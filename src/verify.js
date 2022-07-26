@@ -7,16 +7,11 @@ module.exports = async (jwtStr, endpoint) => {
 
   const res = await axios.get(`${endpoint}/api/rev-store/public-key`)
 
-  try {
-    const decoded = await jwt.verify(
-      jwtStr,
-      Buffer.from(res.data.publicKey, 'base64'),
-      { algorithms: ['RS256'] }
-    )
+  const decoded = await jwt.verify(
+    jwtStr,
+    Buffer.from(res.data.publicKey, 'base64'),
+    { algorithms: ['RS256'] }
+  )
 
-    return decoded
-  } catch (e) {
-    console.log(e)
-    return null
-  }
+  return decoded
 }

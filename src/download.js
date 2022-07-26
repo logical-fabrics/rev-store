@@ -1,5 +1,3 @@
-const axios = require('axios')
-
 const verify = require('./verify')
 
 module.exports = async (jwtStr, endpoint) => {
@@ -7,8 +5,6 @@ module.exports = async (jwtStr, endpoint) => {
   if (!endpoint) throw new Error('endpoint is invalid')
 
   const decoded = await verify(jwtStr, endpoint)
-
-  if (_.isNull(decoded)) throw new Error('invalid signature')
 
   const urls = _.map(
     decoded.files,
