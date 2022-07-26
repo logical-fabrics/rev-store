@@ -1,0 +1,12 @@
+{
+  "name": "rev-store",
+  "main": "index.js",
+  "version": "1.0.0",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^0.27.2",
+    "jsonwebtoken": "^8.5.1",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {}
+}
