@@ -1,3 +1,5 @@
+const _ = require('lodash')
+
 const verify = require('./verify')
 
 module.exports = async (jwtStr, endpoint) => {
