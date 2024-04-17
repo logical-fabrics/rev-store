@@ -49,3 +49,19 @@ const jwt = await download('hoge', 'https://hogehoge.com')
 署名が有効な場合、アップロードされたファイルの URL 返却されます。
 
 署名が有効でない場合や、エラー発生時には、例外が発生します。
+
+## sendOrderEmail(serviceId, shopId, orderIds, endpoint)
+
+店舗に注文メールを送信します。
+
+エラー発生時には、例外が発生します。
+
+```js
+const { sendOrderEmail } = require('rev-store')
+await sendOrderEmail(
+  'hoge', // 指定のサービスID
+  '0000', // 店舗ID
+  ['0000-0000', '1111-1111'], // 注文ID
+  'https://hogehoge.com' // 指定のエンドポイント
+)
+```
