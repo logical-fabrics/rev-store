@@ -8,3 +8,10 @@ export function upload(
 export function verify(jwtStr: string, endpoint: string): object
 
 export function download(jwtStr: string, endpoint: string): string[]
+
+export function sendOrderEmail(
+  serviceId: string,
+  shopId: string,
+  orderIds: string[],
+  endpoint: string
+): object
