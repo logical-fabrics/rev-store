@@ -65,3 +65,18 @@ await sendOrderEmail(
   'https://hogehoge.com' // 指定のエンドポイント
 )
 ```
+
+## registerOrder(serviceId, metadata, endpoint)
+
+注文の本登録処理を行います。
+
+エラー発生時には、例外が発生します。
+
+```js
+const { registerOrder } = require('rev-store')
+const result = await registerOrder(
+  'hoge', // 指定のサービスID
+  { foo: 'bar' }, // 任意のオブジェクト
+  'https://hogehoge.com' // 指定のエンドポイント
+)
+```
