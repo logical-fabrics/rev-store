@@ -15,3 +15,9 @@ export function sendOrderEmail(
   orderIds: string[],
   endpoint: string
 ): object
+
+export function registerOrder(
+  serviceId: string,
+  metadata: object,
+  endpoint: string
+): Promise<object>
