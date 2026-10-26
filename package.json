@@ -1,6 +1,11 @@
 {
   "name": "rev-store",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "src"
+  ],
   "version": "2.6.0",
   "license": "MIT",
   "dependencies": {

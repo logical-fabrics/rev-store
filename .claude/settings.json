@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|Monitor|Edit|Write|MultiEdit|NotebookEdit|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$REPO_PATROL\" = 1 ] || exit 0; node \"$CLAUDE_PROJECT_DIR/.claude/skills/repo-patrol/guard.mjs\" || exit 2",
+            "timeout": 30,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}
