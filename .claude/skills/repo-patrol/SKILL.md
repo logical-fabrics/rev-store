@@ -75,10 +75,13 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 | 巡回 PR を作る | `gh api -X POST repos/<REPO>/pulls --input /tmp/repo-patrol/pr.json` | title, body, head（`claude/patrol-deps`）, base, draft |
 | 巡回 PR の題名・本文を直す | `gh api -X PATCH repos/<REPO>/pulls/<番号> --input /tmp/repo-patrol/pr.json` | title, body |
 | コメントする | `gh api -X POST repos/<REPO>/issues/<番号>/comments --input /tmp/repo-patrol/comment.json` | body |
-| push する | `git push --force-with-lease origin HEAD:refs/heads/claude/patrol-deps` | |
+| push する（リモートに `claude/patrol-deps` がない） | `git push origin HEAD:refs/heads/claude/patrol-deps` | |
+| push する（リモートに `claude/patrol-deps` がある） | `git push --force-with-lease origin HEAD:refs/heads/claude/patrol-deps` | |
 | 閉じる・ラベルを付ける | `.claude/skills/repo-patrol/scripts/stale.sh <REPO> close` | |
 
 書き込みのコマンドは単独で実行する（`&&` や `;` でつながない）。末尾に `--jq '<式>'` を足してよい。
+
+push の前に `git rev-parse --verify -q origin/claude/patrol-deps` で、リモートにブランチがあるかを見る（何も出なければない）。ないときは `--force-with-lease` を付けない（auto mode の分類器が force push として止める）。
 
 よく使う読み取り:
 
