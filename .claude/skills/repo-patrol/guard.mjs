@@ -6,12 +6,27 @@
 // マージや secrets の保護は GitHub 側（ruleset・environment）で行う。
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PATROL_BRANCH = "claude/patrol-deps";
+const DEPENDABOT = "dependabot[bot]";
 const PATROL_TMP = "/tmp/repo-patrol";
+// 書き込みの件数を session_id ごとに数える場所。巡回が書けるのは PATROL_TMP の中だけなので、ここは書き換えられない
+const WRITE_COUNT_DIR = "/tmp/repo-patrol-guard";
+// 1 回の実行で通す書き込みの上限（SKILL.md の「守ること」）。通した時点で数え、あとで失敗しても戻さない
+const WRITE_LIMITS = {
+  pull: { limit: 1, label: "巡回 PR の作成" },
+  comment: { limit: 20, label: "コメント" },
+  slack: { limit: 1, label: "Slack への投稿" },
+};
 const CHECK_DIFF = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "scripts",
@@ -89,6 +104,7 @@ const API_WRITES = [
     method: "POST",
     path: (repo) => new RegExp(`^repos/${escapeRegExp(repo)}/pulls$`, "i"),
     keys: ["title", "body", "head", "base", "draft", "maintainer_can_modify"],
+    counts: "pull",
     check: (data) =>
       data.head === PATROL_BRANCH
         ? null
@@ -111,6 +127,16 @@ const API_WRITES = [
     path: (repo) =>
       new RegExp(`^repos/${escapeRegExp(repo)}/issues/\\d+/comments$`, "i"),
     keys: ["body"],
+    counts: "comment",
+    // 巡回がコメントするのは、取り込まない Dependabot の PR への見送り理由だけ
+    check: (_data, endpoint, ctx) => {
+      const pull = ctx.fetchPull(
+        endpoint.replace(/\/issues\/(\d+)\/comments$/i, "/pulls/$1"),
+      );
+      return pull?.author === DEPENDABOT && pull.headRepo === pull.baseRepo
+        ? null
+        : "コメントできるのは Dependabot の PR だけ";
+    },
   },
 ];
 
@@ -179,6 +205,10 @@ function createContext(input, overrides) {
     root,
     repo: config?.repo ?? null,
     extras,
+    sessionId: input?.session_id,
+    writeCountDir: overrides.writeCountDir ?? WRITE_COUNT_DIR,
+    // このコマンドの中の数える書き込み（checkCommand が最後にまとめて数える）
+    writes: [],
     fetchPull: overrides.fetchPull ?? ((endpoint) => fetchPull(endpoint, root)),
     checkDiff:
       overrides.checkDiff ?? ((mode) => checkDiffProblems(root, extras, mode)),
@@ -413,7 +443,36 @@ function checkCommand(command, ctx) {
       cwd = path.resolve(cwd, simple.words[1]);
     }
   }
+  if (ctx.writes.length > 1) {
+    return block(
+      "PR の作成・コメント・Slack への投稿は、1 つずつ単独で実行する",
+    );
+  }
+  if (ctx.writes.length === 1) return countWrite(ctx.writes[0], ctx) ?? ALLOW;
   return ALLOW;
+}
+
+// 1 件ごとに番号のファイルを排他的に作って数える（並列のツール呼び出しでも上限を越えない）。
+function countWrite(kind, ctx) {
+  const { limit, label } = WRITE_LIMITS[kind];
+  if (typeof ctx.sessionId !== "string" || !/^[\w-]+$/.test(ctx.sessionId)) {
+    return block(`hook の入力に session_id がないので、${label}を数えられない`);
+  }
+  const dir = path.join(ctx.writeCountDir, ctx.sessionId);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (let n = 1; n <= limit; n++) {
+      try {
+        writeFileSync(path.join(dir, `${kind}-${n}`), "", { flag: "wx" });
+        return null;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+    }
+  } catch {
+    return block(`${label}の件数を ${dir} に記録できない`);
+  }
+  return block(`${label}は 1 回の実行で ${limit} 件まで（超えたので止めた）`);
 }
 
 function checkSimpleCommand({ words, redirects }, ctx) {
@@ -539,12 +598,24 @@ function checkOwnScript(scriptPath, args, ctx) {
     if (!ctx.repo || args[0]?.toLowerCase() !== ctx.repo.toLowerCase()) {
       return block(`${parts[4]} には設定のリポジトリ（${ctx.repo}）を渡す`);
     }
+    // close は Actions の workflow（workflows/repo-patrol-stale.yml）が行う
+    if (parts[4] === "stale.sh" && (args.length !== 2 || args[1] !== "list")) {
+      return block(
+        "stale.sh は list だけ（close は Actions の workflow が行う）",
+      );
+    }
   }
   if (parts[2] === "repo-patrol" && parts[4] === "slack-post.sh") {
-    const target = path.resolve(ctx.cwd, args[0] ?? "");
-    if (args.length !== 1 || !isUnder(target, PATROL_TMP)) {
-      return block(`slack-post.sh に渡せるのは ${PATROL_TMP}/ のファイルだけ`);
+    // --check は投稿せずに検証するだけなので数えない
+    const check = args[0] === "--check";
+    const files = check ? args.slice(1) : args;
+    const target = path.resolve(ctx.cwd, files[0] ?? "");
+    if (files.length !== 1 || !isUnder(target, PATROL_TMP)) {
+      return block(
+        `slack-post.sh に渡せるのは [--check] と ${PATROL_TMP}/ のファイルだけ`,
+      );
     }
+    if (!check) ctx.writes.push("slack");
   }
   return checkReadPaths(args, ctx);
 }
@@ -755,7 +826,9 @@ function checkGh(args, ctx) {
     }
   }
   const reason = rule.check?.(data, endpoint, ctx);
-  return reason ? block(reason) : null;
+  if (reason) return block(reason);
+  if (rule.counts) ctx.writes.push(rule.counts);
+  return null;
 }
 
 // @dependabot はどこにあっても拒否する。ほかは、コードとして囲んだ部分と HTML コメントを除いて
@@ -958,12 +1031,12 @@ function fetchPull(endpoint, cwd) {
         "api",
         endpoint,
         "--jq",
-        '[.head.ref, (.head.repo.full_name // ""), .base.repo.full_name] | @tsv',
+        '[.head.ref, (.head.repo.full_name // ""), .base.repo.full_name, .user.login] | @tsv',
       ],
       { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
     ).trim();
-    const [headRef, headRepo, baseRepo] = out.split("\t");
-    return { headRef, headRepo, baseRepo };
+    const [headRef, headRepo, baseRepo, author] = out.split("\t");
+    return { headRef, headRepo, baseRepo, author };
   } catch {
     return null;
   }

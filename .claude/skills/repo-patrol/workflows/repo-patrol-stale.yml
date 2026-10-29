@@ -1,0 +1,33 @@
+# repo-patrol: 30 日を過ぎた Issue / PR を閉じる（巡回より前に、毎朝 1 回）。
+# 正本は logical-fabrics/skills の .claude/skills/repo-patrol/workflows/。導入先では .github/workflows/ に写す（手で編集しない）
+name: repo-patrol stale
+
+on:
+  schedule:
+    # 08:17 JST。毎時 0 分は GitHub 側で遅れやすいので避ける
+    - cron: "17 23 * * *"
+  workflow_dispatch:
+
+# リポジトリの既定（read）より広い権限を、この workflow にだけ与える
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: repo-patrol-stale
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Close stale issues and pull requests
+        run: bash .claude/skills/repo-patrol/scripts/stale.sh "$GITHUB_REPOSITORY" close
+        env:
+          GH_TOKEN: ${{ github.token }}

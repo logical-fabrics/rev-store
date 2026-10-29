@@ -10,6 +10,7 @@
 # list の出力（TSV）: 区分 番号 種類 経過日数 基準 タイトル
 #   区分: close（閉じる）/ notice（7 日以内に閉じる予定）/ notice-first（今日 notice に入った）/ hold（閉じない）
 # close は判定をやり直してから、閉じる → patrol-closed ラベル → 理由のコメント、の順に行う。
+# close は Actions の workflow（workflows/repo-patrol-stale.yml）から呼ぶ。巡回（LLM）は list だけを使う。
 # 閉じるのは 1 日（UTC）10 件まで（失敗した試行も数える）。--max で減らせるが増やせない。
 # 終了コード: 0 成功 / 1 取得や close の失敗 / 2 閉じたがラベルかコメントに失敗したものがある
 set -euo pipefail
@@ -70,8 +71,9 @@ classify() {
 
 comment_body() {
   local kind=$1 footer="— repo-patrol"
-  if [ -n "${CLAUDE_CODE_REMOTE_SESSION_ID:-}" ]; then
-    footer="$footer ・ 実行ログ: https://claude.ai/code/${CLAUDE_CODE_REMOTE_SESSION_ID/#cse_/session_}"
+  # close は Actions の workflow（workflows/repo-patrol-stale.yml）が行うので、実行ログはその実行
+  if [ -n "${GITHUB_RUN_ID:-}" ]; then
+    footer="$footer ・ 実行ログ: ${GITHUB_SERVER_URL:-https://github.com}/${repo}/actions/runs/${GITHUB_RUN_ID}"
   fi
   if [ "$kind" = dependabot ]; then
     printf '作成から %s 日たっても取り込まれていないため、巡回で閉じました。新しい版が出ると Dependabot が改めて PR を作ります。この版が必要なら reopen してください。\n\n%s\n' "$STALE_DAYS" "$footer"

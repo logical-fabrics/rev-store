@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# 巡回の結果を Slack に 1 回投稿する。
-# usage: slack-post.sh <本文ファイル>
+# 巡回の報告を Slack に 1 回投稿する。
+# usage: slack-post.sh [--check] <報告の JSON>
 #
 # - 宛先は、リポジトリの .claude/repo-patrol.md の「## Slack チャンネル」に書いたチャンネル ID か #チャンネル名だけ
 #   （巡回は .claude を書き換えられないので、宛先を変えられない）。トークンは cloud environment の network secret（host slack.com）が付ける
-# - 本文は slack-message.mjs が Block Kit にする（書式・エスケープ・メンション・リンクの決まりはそちらに書いた）。
-#   #番号は「## リポジトリ」の Issue / PR へのリンクになる
+# - 報告は slack-message.mjs が検証して Block Kit にする（件数・メンション・投稿するか・エスケープ・リンクの決まりはそちらに書いた）。
+#   #番号は「## リポジトリ」の Issue / PR へのリンクになる。報告の形が違えば exit 1
+# - 投稿することがない日は、投稿せずに exit 0
 # - Block Kit が拒否されたら（invalid_blocks など）、同じ内容を文字だけで送り直す
-# - REPO_PATROL=1 でなければ投稿せず、宛先と送る本文を表示する
+# - --check か、REPO_PATROL=1 でなければ、投稿せずに宛先と送る本文を表示する（guard は --check を投稿の回数に数えない）
 # - 一時的なエラー（HTTP 429・5xx・通信の失敗・ratelimited など）だけ Retry-After を守って 3 回まで試し、だめなら exit 1
 set -euo pipefail
 
+check=0
+if [ "${1:-}" = --check ]; then
+  check=1
+  shift
+fi
 file=$1
 scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 config="$(git rev-parse --show-toplevel)/.claude/repo-patrol.md"
@@ -32,8 +38,13 @@ repo=$(config_value "リポジトリ")
 
 messages=$(node "$scripts/slack-message.mjs" "$file" "$channel" "$repo")
 
-if [ "${REPO_PATROL:-}" != 1 ]; then
-  echo "（REPO_PATROL=1 ではないので投稿しない。宛先: ${channel}。送る本文:）"
+if [ "$messages" = null ]; then
+  echo "報告することがないので投稿しなかった"
+  exit 0
+fi
+
+if [ "$check" = 1 ] || [ "${REPO_PATROL:-}" != 1 ]; then
+  echo "（投稿しない。宛先: ${channel}。送る本文:）"
   jq -r .plain.text <<<"$messages"
   echo "（Block Kit:）"
   jq .rich.blocks <<<"$messages"
