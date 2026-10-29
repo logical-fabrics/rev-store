@@ -1,0 +1,97 @@
+# repo-patrol: 毎朝の巡回を、GitHub Actions 上の Claude で動かす（claude.ai の scheduled task の代わり）。
+# 正本は logical-fabrics/skills の .claude/skills/repo-patrol/workflows/。導入先では .github/workflows/ に写す（手で編集しない）
+# 人が次を置くまでは動かない（docs/repo-patrol.md の「Actions で動かす」）:
+#   secrets.CLAUDE_CODE_OAUTH_TOKEN（claude setup-token で作る。持ち主のサブスクの枠を使う）・secrets.SLACK_BOT_TOKEN
+#   vars.REPO_PATROL_MODE: observe（GitHub に書かず、Slack にも投稿しない。報告は job summary）か live
+name: repo-patrol
+
+on:
+  schedule:
+    # 09:07 JST（close の workflow の 08:17 のあと）。毎時 0 分は GitHub 側で遅れやすいので避ける
+    - cron: "7 0 * * *"
+  workflow_dispatch:
+
+# 権限はこれが境界。コードは書けない（contents: read）。PR へのコメントと、Actions・check の読み取りだけ
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+  checks: read
+  statuses: read
+
+concurrency:
+  group: repo-patrol
+
+jobs:
+  patrol:
+    if: vars.REPO_PATROL_MODE == 'observe' || vars.REPO_PATROL_MODE == 'live'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      REPO_PATROL: "1"
+      TZ: Asia/Tokyo
+      # 観察モードでは guard が GitHub への書き込みを止める（scheduled task と並行して動かすため）
+      REPO_PATROL_OBSERVE: ${{ vars.REPO_PATROL_MODE == 'live' && '0' || '1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # 巡回は pnpm audit だけを使う（install はしない）。版は packageManager に合わせる
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Patrol
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Claude GitHub App のトークンではなく、この workflow の permissions に絞ったトークンを使う
+          github_token: ${{ github.token }}
+          # guard の hook を通らない読み取りのツール（Read・Glob・Grep）は使わせない。/proc などからトークンを読めないように、読むのは guard が見る Bash だけにする
+          claude_args: --allowedTools "Bash,Write,Edit" --disallowedTools "Read,Glob,Grep,NotebookEdit,Task,WebFetch,WebSearch"
+          prompt: |
+            .claude/skills/repo-patrol/SKILL.md を読んで、そのとおりに巡回する。設定は .claude/repo-patrol.md。ファイルは cat などのシェルのコマンドで読む（Read ツールは使えない）。
+            これは GitHub Actions 上の無人の定期実行。マージ、本番昇格、リポジトリ設定の変更はしない。
+            Slack への投稿はこのあとの step が行うので、手順 6 は `slack-post.sh --check` で確かめるところまでにする。
+            ${{ vars.REPO_PATROL_MODE != 'live' && '観察モード: GitHub には書かない。コメントするはずだった Dependabot の PR は、コメントしたものとして報告する。' || '' }}
+
+      # Slack のトークンは、ここにだけ渡す（Claude と、Claude が起動したプロセスには見せない）
+      - name: Post the report to Slack
+        if: vars.REPO_PATROL_MODE == 'live'
+        run: bash .claude/skills/repo-patrol/scripts/slack-post.sh /tmp/repo-patrol/report.json
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Show the report
+        if: always()
+        run: |
+          if [ ! -f /tmp/repo-patrol/report.json ]; then
+            echo "報告（/tmp/repo-patrol/report.json）がない" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo '```text'
+            REPO_PATROL=0 bash .claude/skills/repo-patrol/scripts/slack-post.sh --check /tmp/repo-patrol/report.json
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # 失敗した日は報告が届かないので、失敗したことだけを知らせる
+      - name: Tell Slack that the patrol failed
+        if: failure() && vars.REPO_PATROL_MODE == 'live'
+        run: |
+          mkdir -p /tmp/repo-patrol
+          jq -n --arg date "$(date +%F)" --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{date: $date, sessionUrl: $url, items: [{kind: "decision", label: "巡回", reason: "Actions の実行が失敗した（実行ログを見る）", commentedNow: false, security: true}]}' \
+            >/tmp/repo-patrol/failed.json
+          bash .claude/skills/repo-patrol/scripts/slack-post.sh /tmp/repo-patrol/failed.json
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

@@ -21,7 +21,9 @@ const LINE_LIMIT = 2900;
 const BLOCK_LIMIT = 50;
 const STRING_LIMIT = 300;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const SESSION_URL = /^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9_-]+$/;
+// claude.ai のセッションか、Actions の実行（session-url.sh の出力）
+const SESSION_URL =
+  /^(?:https:\/\/claude\.ai\/code\/session_[A-Za-z0-9_-]+|https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/\d+)$/;
 // 英数字・/・#・`、エスケープした文字（&amp; など）の直後の # は番号として扱わない（URL の断片やコードの中を避ける）
 const ISSUE_REF = /(?<![\w/&;#`])#(\d+)(?!\w)/g;
 

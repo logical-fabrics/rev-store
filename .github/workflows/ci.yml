@@ -1,0 +1,34 @@
+# PR ごとに、依存を入れてモジュールが読み込めるかを確かめる（テスト・lint はない）。
+# Dependabot の PR も対象（巡回 PR がなくなり、依存の更新を確かめるのはこの CI と dependency-check になった）
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+
+      # packageManager と同じ版（Node 25 以上には corepack がないので npm で入れる）
+      - name: Install pnpm
+        run: npm install -g pnpm@12.15.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Load the module
+        run: node -e "require('./')"

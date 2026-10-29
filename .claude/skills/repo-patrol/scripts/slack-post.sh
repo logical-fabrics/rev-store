@@ -3,7 +3,8 @@
 # usage: slack-post.sh [--check] <報告の JSON>
 #
 # - 宛先は、リポジトリの .claude/repo-patrol.md の「## Slack チャンネル」に書いたチャンネル ID か #チャンネル名だけ
-#   （巡回は .claude を書き換えられないので、宛先を変えられない）。トークンは cloud environment の network secret（host slack.com）が付ける
+#   （巡回は .claude を書き換えられないので、宛先を変えられない）。トークンは、cloud environment では network secret（host slack.com）が付け、
+#   Actions では workflow の投稿の step が環境変数 SLACK_BOT_TOKEN で渡す
 # - 報告は slack-message.mjs が検証して Block Kit にする（件数・メンション・投稿するか・エスケープ・リンクの決まりはそちらに書いた）。
 #   #番号は「## リポジトリ」の Issue / PR へのリンクになる。報告の形が違えば exit 1
 # - 投稿することがない日は、投稿せずに exit 0
@@ -54,6 +55,12 @@ fi
 payload=$(jq -c .rich <<<"$messages")
 plain=$(jq -c .plain <<<"$messages")
 
+# set -u の bash 3.2 は空の配列を展開できないので、${auth[@]+...} で展開する
+auth=()
+if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+  auth=(-H "Authorization: Bearer ${SLACK_BOT_TOKEN}")
+fi
+
 headers=$(mktemp)
 body=$(mktemp)
 trap 'rm -f "$headers" "$body"' EXIT
@@ -61,7 +68,7 @@ trap 'rm -f "$headers" "$body"' EXIT
 error=unknown
 for attempt in 1 2 3; do
   code=$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -X POST https://slack.com/api/chat.postMessage \
-    -H 'Content-Type: application/json; charset=utf-8' \
+    -H 'Content-Type: application/json; charset=utf-8' ${auth[@]+"${auth[@]}"} \
     --data-binary "$payload") || code=000
   if [ "$(jq -r '.ok // false' "$body" 2>/dev/null || echo false)" = true ]; then
     echo "投稿した（ts=$(jq -r .ts "$body")）"

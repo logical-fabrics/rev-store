@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 巡回 PR の差分が「既存の依存の版の更新」だけかを確かめる。
+// 依存更新の PR の差分が「既存の依存の版の更新」だけかを確かめる。dependency-check.mjs が使う。
 // usage: node check-diff.mjs <base ref> [--head] [追加で許すパスのパターン ...]
 //   既定は作業ツリー（コミット前のものを含む）を見る。--head は push される HEAD のコミットを見る（guard が push の前に使う）
 //   パターンの * は / 以外、** は任意の文字列に一致する（例: biome.json、apps/*/tsconfig.json）
