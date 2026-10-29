@@ -16,30 +16,17 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PATROL_BRANCH = "claude/patrol-deps";
 const DEPENDABOT = "dependabot[bot]";
 const PATROL_TMP = "/tmp/repo-patrol";
 // 書き込みの件数を session_id ごとに数える場所。巡回が書けるのは PATROL_TMP の中だけなので、ここは書き換えられない
 const WRITE_COUNT_DIR = "/tmp/repo-patrol-guard";
 // 1 回の実行で通す書き込みの上限（SKILL.md の「守ること」）。通した時点で数え、あとで失敗しても戻さない
 const WRITE_LIMITS = {
-  pull: { limit: 1, label: "巡回 PR の作成" },
   comment: { limit: 20, label: "コメント" },
   slack: { limit: 1, label: "Slack への投稿" },
 };
-const CHECK_DIFF = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "scripts",
-  "check-diff.mjs",
-);
 
 const PROTECTED_SEGMENTS = new Set([".claude", ".github", ".git"]);
-const DEPENDENCY_FILES = new Set([
-  "package.json",
-  "pnpm-lock.yaml",
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-]);
 
 // 書き込みや実行のオプションを持たないコマンド。読めるのはリポジトリと作業ディレクトリの中だけにする。
 const READ_ONLY_COMMANDS = new Set([
@@ -102,28 +89,6 @@ const GIT_READ_SUBCOMMANDS = new Set([
 const API_WRITES = [
   {
     method: "POST",
-    path: (repo) => new RegExp(`^repos/${escapeRegExp(repo)}/pulls$`, "i"),
-    keys: ["title", "body", "head", "base", "draft", "maintainer_can_modify"],
-    counts: "pull",
-    check: (data) =>
-      data.head === PATROL_BRANCH
-        ? null
-        : `PR の head は ${PATROL_BRANCH} だけ`,
-  },
-  {
-    method: "PATCH",
-    path: (repo) => new RegExp(`^repos/${escapeRegExp(repo)}/pulls/\\d+$`, "i"),
-    keys: ["title", "body"],
-    check: (_data, endpoint, ctx) => {
-      const pull = ctx.fetchPull(endpoint);
-      if (!pull) return "PR を確認できない";
-      return pull.headRef === PATROL_BRANCH && pull.headRepo === pull.baseRepo
-        ? null
-        : "書き換えてよいのは巡回 PR だけ";
-    },
-  },
-  {
-    method: "POST",
     path: (repo) =>
       new RegExp(`^repos/${escapeRegExp(repo)}/issues/\\d+/comments$`, "i"),
     keys: ["body"],
@@ -179,8 +144,19 @@ export function evaluate(input, overrides = {}) {
       return checkCommand(toolInput.command, ctx);
     case "Edit":
     case "Write":
-    case "MultiEdit":
-      return checkWritePath(toolInput.file_path, ctx);
+    case "MultiEdit": {
+      const text = [
+        toolInput.content,
+        toolInput.new_string,
+        ...(Array.isArray(toolInput.edits)
+          ? toolInput.edits.map((edit) => edit?.new_string)
+          : []),
+      ].filter((value) => typeof value === "string");
+      return (
+        secretProblem(text.join("\n"), ctx) ??
+        checkWritePath(toolInput.file_path, ctx)
+      );
+    }
     case "NotebookEdit":
       return checkWritePath(toolInput.notebook_path, ctx);
     default:
@@ -199,22 +175,40 @@ function createContext(input, overrides) {
   const root = overrides.root ?? process.env.CLAUDE_PROJECT_DIR ?? cwd;
   const config =
     overrides.config !== undefined ? overrides.config : readConfig(root);
-  const extras = config?.extras ?? [];
   return {
     cwd,
     root,
     repo: config?.repo ?? null,
-    extras,
     sessionId: input?.session_id,
+    // 観察モード（Actions の workflow を scheduled task と並行して動かす間）は GitHub に書かない
+    observe: overrides.observe ?? process.env.REPO_PATROL_OBSERVE === "1",
+    // Actions では Slack への投稿は workflow の別の step が行う（Claude には Slack のトークンを渡さない）
+    actions: overrides.actions ?? process.env.GITHUB_ACTIONS === "true",
     writeCountDir: overrides.writeCountDir ?? WRITE_COUNT_DIR,
     // このコマンドの中の数える書き込み（checkCommand が最後にまとめて数える）
     writes: [],
     fetchPull: overrides.fetchPull ?? ((endpoint) => fetchPull(endpoint, root)),
-    checkDiff:
-      overrides.checkDiff ?? ((mode) => checkDiffProblems(root, extras, mode)),
-    defaultBranch: overrides.defaultBranch ?? (() => defaultBranch(root)),
-    isTracked: overrides.isTracked ?? ((relative) => isTracked(root, relative)),
+    secrets: overrides.secrets ?? secretValues(process.env),
   };
+}
+
+// hook は巡回と同じ環境変数を受け継ぐ。トークンらしい値（名前に TOKEN・SECRET・KEY・PASSWORD を含み、20 文字以上）を集める
+function secretValues(env) {
+  return Object.entries(env)
+    .filter(
+      ([name, value]) =>
+        /TOKEN|SECRET|KEY|PASSWORD/i.test(name) &&
+        typeof value === "string" &&
+        value.length >= 20,
+    )
+    .map(([, value]) => value);
+}
+
+// 書き込む本文やコメントにトークンの値が入っていたら止める（読めてしまった値を外へ出さない）
+function secretProblem(text, ctx) {
+  return ctx.secrets.some((secret) => text.includes(secret))
+    ? block("書き込む内容に環境変数のトークンの値が入っている")
+    : null;
 }
 
 // .claude/repo-patrol.md の「リポジトリ」と「差分に含めてよい追加のパス」を読む。
@@ -243,24 +237,7 @@ export function readConfig(root) {
   return { repo, extras };
 }
 
-function globToRegExp(pattern) {
-  return new RegExp(
-    `^${pattern
-      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, "\0")
-      .replace(/\*/g, "[^/]*")
-      .replace(/\0/g, ".*")}$`,
-  );
-}
-
-function isDependencyFile(relative, extras) {
-  return (
-    DEPENDENCY_FILES.has(path.basename(relative)) ||
-    extras.some((pattern) => globToRegExp(pattern).test(relative))
-  );
-}
-
-// 書き込めるのは、作業ディレクトリと、リポジトリで追跡している依存ファイル（と設定で許したファイル）だけ。
+// 書き込めるのは作業ディレクトリだけ。依存の更新は Dependabot が行う。
 function checkWritePath(filePath, ctx) {
   if (typeof filePath !== "string" || filePath === "") {
     return block("書き込み先を読めない");
@@ -269,28 +246,8 @@ function checkWritePath(filePath, ctx) {
   if (isUnder(absolute, PATROL_TMP) && !absolute.split("/").includes("..")) {
     return ALLOW;
   }
-  let realParent;
-  let realRoot;
-  try {
-    realParent = realpathSync(path.dirname(absolute));
-    realRoot = realpathSync(ctx.root);
-  } catch {
-    return block(`${absolute} の場所を確かめられない`);
-  }
-  const relative = relativeInside(
-    realRoot,
-    path.join(realParent, path.basename(absolute)),
-  );
-  if (
-    relative !== null &&
-    !hasProtectedSegment(relative) &&
-    isDependencyFile(relative, ctx.extras) &&
-    ctx.isTracked(relative)
-  ) {
-    return ALLOW;
-  }
   return block(
-    `${absolute} には書き込まない（書けるのは ${PATROL_TMP}/ と、追跡済みの依存ファイル・設定で許したファイルだけ）`,
+    `${absolute} には書き込まない（書けるのは ${PATROL_TMP}/ だけ）`,
   );
 }
 
@@ -503,10 +460,6 @@ function checkSimpleCommand({ words, redirects }, ctx) {
       return checkPnpm(args, ctx);
     case "npm":
       return checkNpm(args, ctx);
-    case "corepack":
-      return args.length === 1 && args[0] === "enable"
-        ? null
-        : block("corepack は enable だけ");
     case "node":
     case "bash":
     case "sh":
@@ -561,10 +514,15 @@ function checkReadPaths(args, ctx) {
     } catch {
       return block(`${arg} を確かめられない`);
     }
-    if (relativeInside(realRoot, real) === null) {
+    const relative = relativeInside(realRoot, real);
+    if (relative === null) {
       return block(
         `${arg} は読まない（読めるのはリポジトリと ${PATROL_TMP}/ の中だけ）`,
       );
+    }
+    // .git/config などには、Actions で git の認証情報が入ることがある
+    if (relative.split(path.sep).includes(".git")) {
+      return block(`${arg} は読まない（.git の中は読まない）`);
     }
   }
   return null;
@@ -615,6 +573,11 @@ function checkOwnScript(scriptPath, args, ctx) {
         `slack-post.sh に渡せるのは [--check] と ${PATROL_TMP}/ のファイルだけ`,
       );
     }
+    if (!check && ctx.actions) {
+      return block(
+        "Actions では slack-post.sh は --check だけ（投稿は workflow のあとの step が行う）",
+      );
+    }
     if (!check) ctx.writes.push("slack");
   }
   return checkReadPaths(args, ctx);
@@ -647,84 +610,11 @@ function checkGit(args, ctx) {
         : block("git fetch は origin から、決まったオプションだけ");
     }
     case "remote":
-      return /^(?:set-head origin (?:-a|--auto)|-v|get-url origin)$/.test(
-        joined,
-      )
+      return /^set-head origin (?:-a|--auto)$/.test(joined)
         ? null
-        : block("git remote は set-head origin -a と読み取りだけ");
-    case "checkout": {
-      const base = ctx.defaultBranch();
-      if (!base) {
-        return block(
-          "既定ブランチを確かめられない。git remote set-head origin -a を実行してから使う",
-        );
-      }
-      return new RegExp(
-        `^(?:-q )?-B ${escapeRegExp(PATROL_BRANCH)} ${escapeRegExp(base)}$`,
-      ).test(joined)
-        ? null
-        : block(`git checkout は -B ${PATROL_BRANCH} ${base} だけ`);
-    }
-    // check-diff を通らなかった更新を戻すため。install は check-diff で止まるので、ほかに戻す手段がない
-    case "restore": {
-      const paths = rest.filter(
-        (arg) => !["--staged", "--worktree", "-S", "-W", "--"].includes(arg),
-      );
-      return paths.length > 0 &&
-        paths.every((arg) => {
-          const relative = relativeInside(ctx.root, path.resolve(ctx.cwd, arg));
-          return (
-            /^[\w.@][\w./@-]*$/.test(arg) &&
-            relative !== null &&
-            !hasProtectedSegment(relative) &&
-            isDependencyFile(relative, ctx.extras) &&
-            ctx.isTracked(relative)
-          );
-        })
-        ? null
-        : block(
-            "git restore は [--staged] [--worktree] と追跡済みの依存ファイルだけ",
-          );
-    }
-    case "add":
-      return rest.every(
-        (arg) =>
-          ["-A", "--all", "-u"].includes(arg) ||
-          (!arg.startsWith("-") &&
-            !hasProtectedSegment(
-              path.relative(ctx.root, path.resolve(ctx.cwd, arg)),
-            )),
-      )
-        ? null
-        : block("git add で .claude・.github・.git を扱わない");
-    case "commit": {
-      const match = joined.match(/^(?:-q )?-F (\S+)$/);
-      return match && isUnder(path.resolve(ctx.cwd, match[1]), PATROL_TMP)
-        ? null
-        : block(`git commit は -F ${PATROL_TMP}/<ファイル> だけ`);
-    }
-    case "push": {
-      if (
-        !new RegExp(
-          `^(?:(?:-u|--force-with-lease) )*origin HEAD:refs/heads/${escapeRegExp(PATROL_BRANCH)}$`,
-        ).test(joined)
-      ) {
-        return block(
-          `push は git push [-u] [--force-with-lease] origin HEAD:refs/heads/${PATROL_BRANCH} の形だけ`,
-        );
-      }
-      const problems = ctx.checkDiff("head");
-      return problems
-        ? block(`push する内容が check-diff を通らない: ${problems}`)
-        : null;
-    }
-    case "config":
-      return /^(?:user\.(?:name|email) \S.*|--get(?:-all)? \S+|--list|-l)$/.test(
-        joined,
-      )
-        ? null
-        : block("git config は user.name・user.email と読み取りだけ");
+        : block("git remote は set-head origin -a だけ");
     default:
+      // 依存の更新は Dependabot が行うので、巡回はブランチやコミットを作らず push もしない
       return block(`git ${subcommand} は使わない`);
   }
 }
@@ -792,6 +682,11 @@ function checkGh(args, ctx) {
   if (!ctx.repo) {
     return block("設定（.claude/repo-patrol.md）のリポジトリを読めない");
   }
+  if (ctx.observe) {
+    return block(
+      "観察モードなので GitHub に書かない（書くはずだったものは、書いたものとして報告する）",
+    );
+  }
   const rule = API_WRITES.find(
     (candidate) =>
       candidate.method === method && candidate.path(ctx.repo).test(endpoint),
@@ -803,12 +698,16 @@ function checkGh(args, ctx) {
     return block(`書き込みの本文は ${PATROL_TMP}/ の JSON を --input で渡す`);
   }
 
+  let raw;
   let data;
   try {
-    data = JSON.parse(readFileSync(path.resolve(ctx.cwd, input), "utf8"));
+    raw = readFileSync(path.resolve(ctx.cwd, input), "utf8");
+    data = JSON.parse(raw);
   } catch {
     return block(`--input の ${input} を JSON として読めない`);
   }
+  const secret = secretProblem(raw, ctx);
+  if (secret) return secret;
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
     return block("--input の JSON はオブジェクトにする");
   }
@@ -857,7 +756,6 @@ function checkPnpm(args, ctx) {
     rest = rest.slice(2);
   }
   const [subcommand, ...more] = rest;
-  const flags = more.join(" ");
 
   if (subcommand === "-v" || subcommand === "--version") {
     return more.length === 0 ? null : block("pnpm --version に引数はいらない");
@@ -876,44 +774,10 @@ function checkPnpm(args, ctx) {
       ? null
       : block("pnpm why にはパッケージ名を渡す");
   }
-  if (subcommand === "install" || subcommand === "i") {
-    if (
-      ![
-        "--frozen-lockfile",
-        "--frozen-lockfile --ignore-scripts",
-        "--lockfile-only --ignore-scripts",
-      ].includes(flags)
-    ) {
-      return block(
-        "pnpm install は --frozen-lockfile か --lockfile-only --ignore-scripts だけ",
-      );
-    }
-    return gate(ctx);
-  }
-  // 推移依存を lockfile だけで範囲内の最新にする。版や範囲は推移依存には付けられない
-  if (subcommand === "update") {
-    const names = more.slice(0, -3);
-    if (
-      names.length === 0 ||
-      more.slice(-3).join(" ") !==
-        "--no-save --lockfile-only --ignore-scripts" ||
-      !names.every((name) => /^(?:@[\w][\w.-]*\/)?[\w][\w.-]*$/.test(name))
-    ) {
-      return block(
-        "pnpm update は「パッケージ名 ... --no-save --lockfile-only --ignore-scripts」だけ（版や範囲は付けない）",
-      );
-    }
-    return gate(ctx);
-  }
-  if (subcommand === "run") {
-    if (more.length !== 1 || !/^[A-Za-z0-9][\w:.-]*$/.test(more[0])) {
-      return block(
-        "pnpm run にはスクリプト名だけを渡す（オプションや引数は付けない）",
-      );
-    }
-    return gate(ctx);
-  }
-  return block(`pnpm ${subcommand ?? ""} は使わない`);
+  // install・update・run は依存のコードを動かしうる。依存の更新は Dependabot が行う
+  return block(
+    `pnpm ${subcommand ?? ""} は使わない（読み取りは audit と why だけ）`,
+  );
 }
 
 function checkNpm(args, ctx) {
@@ -925,7 +789,6 @@ function checkNpm(args, ctx) {
     rest = rest.slice(2);
   }
   const [subcommand, ...more] = rest;
-  const flags = more.join(" ");
 
   if (subcommand === "-v" || subcommand === "--version") {
     return more.length === 0 ? null : block("npm --version に引数はいらない");
@@ -946,81 +809,14 @@ function checkNpm(args, ctx) {
           "npm audit のオプションは --json・--omit=dev・--package-lock-only だけ",
         );
   }
-  if (subcommand === "install" || subcommand === "ci") {
-    const allowed =
-      subcommand === "install"
-        ? ["--package-lock-only --ignore-scripts"]
-        : ["", "--ignore-scripts"];
-    if (!allowed.includes(flags)) {
-      return block(
-        "npm は install --package-lock-only --ignore-scripts か ci だけ",
-      );
-    }
-    return gate(ctx);
-  }
-  return block(`npm ${subcommand ?? ""} は使わない`);
+  return block(
+    `npm ${subcommand ?? ""} は使わない（読み取りは view と audit だけ）`,
+  );
 }
 
 function isInsideRepo(target, ctx) {
   const relative = relativeInside(ctx.root, path.resolve(ctx.cwd, target));
   return relative !== null && !hasProtectedSegment(relative);
-}
-
-// install や run の前に check-diff を通す（作業ツリーが既存の依存の版の更新だけか）。
-function gate(ctx) {
-  const problems = ctx.checkDiff("worktree");
-  return problems
-    ? block(`install や run の前の check-diff が通らない: ${problems}`)
-    : null;
-}
-
-function git(args, cwd) {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-}
-
-function defaultBranch(root) {
-  try {
-    const ref = git(["rev-parse", "--abbrev-ref", "origin/HEAD"], root).trim();
-    return /^origin\/[\w./-]+$/.test(ref) ? ref : null;
-  } catch {
-    return null;
-  }
-}
-
-function isTracked(root, relative) {
-  try {
-    git(["ls-files", "--error-unmatch", "--", relative], root);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// check-diff を実行する。worktree は作業ツリー、head は push される HEAD を見る。
-// 問題がなければ null、あれば出力の要約を返す。worktree で差分がない（exit 3）のは問題にしない。
-export function checkDiffProblems(root, extras, mode) {
-  const args = [
-    CHECK_DIFF,
-    "origin/HEAD",
-    ...(mode === "head" ? ["--head"] : []),
-    ...extras,
-  ];
-  try {
-    execFileSync(process.execPath, args, {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return null;
-  } catch (error) {
-    if (mode === "worktree" && error.status === 3) return null;
-    const output = `${error.stdout ?? ""}${error.stderr ?? ""}`.trim();
-    return output.split("\n").slice(-5).join(" / ") || "check-diff が失敗した";
-  }
 }
 
 function fetchPull(endpoint, cwd) {

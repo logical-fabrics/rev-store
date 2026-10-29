@@ -6,17 +6,17 @@
 
 | 種類 | 扱い |
 |---|---|
-| npm 系以外（GitHub Actions・cargo・docker など） | 取り込まない。CI の状態を添えて報告し、人がそのままマージする |
-| npm 系の patch / minor | 取り込む。公開から 4 日未満なら、4 日を満たすいちばん新しい版にする。それもなければ今回は見送る |
-| npm 系のメジャー | 取り込まない。理由（移行が必要か、peer 依存の都合か）を 1 回だけコメントし、見送り中として報告する |
-| セキュリティ（アラート・audit・本文に GHSA / CVE） | 修正版以上で 4 日を満たす最小の版にする。推移依存は下の「推移依存の更新」に従う。メジャー更新が必要、または 4 日を満たす修正版がなければ取り込まず、要判断（`security: true`）にする |
-| グループ PR（複数の依存をまとめたもの） | 中身を 1 つずつ上の基準で判断する。PR の lockfile はそのまま使わない（範囲内の最新化が混ざることがある） |
+| npm 系以外（GitHub Actions・cargo・docker など） | CI の状態を添えてマージ待ちとして報告し、人がそのままマージする |
+| npm 系の patch / minor（groups で 1 本にまとまる） | CI と dependency-check が通っていればマージ待ちとして報告する。dependency-check が公開から 4 日未満で落ちていれば見送り中にする（4 日たったら人が re-run する） |
+| npm 系のメジャー | マージ待ちにしない。理由（移行が必要か、peer 依存の都合か）を 1 回だけコメントし、見送り中として報告する |
+| セキュリティ（アラート・audit・本文に GHSA / CVE） | 直す Dependabot の PR（セキュリティ更新は cooldown を待たずに来る）があれば、それを見る。なければ下の「推移依存の脆弱性」に沿って見込みを書き、要判断（`security: true`）にする |
+| グループ PR（複数の依存をまとめたもの） | 中身を 1 つずつ上の基準で判断する。範囲内の最新化で新しく入った版も、dependency-check が 1 つずつ公開者・install script・公開日を確かめる |
 | 設定の見送り表にあるもの | 見直す条件を満たしていなければ、見送り中として報告するだけ |
 
 ## 公開日と中身の確かめ方
 
 - 公開日: `npm view <name> time --json` で各版の公開時刻を見る。境界ちょうどの版は避ける。4 日待つのは、乗っ取りやワームで公開された悪意ある版の多くが数時間〜数日で見つかって取り下げられ（npm も公開から 72 時間は作者が取り下げられる）、それより長く待っても安全があまり増えないため
-- インストールスクリプト: `npm view <name>@<version> scripts --json` に `preinstall` / `install` / `postinstall` があれば、取り込まずに要判断にする
+- インストールスクリプト: `npm view <name>@<version> scripts --json` に `preinstall` / `install` / `postinstall` があれば、マージ待ちにせず要判断にする（前の版と同じ install script は dependency-check は通すが、巡回は人に見せる）
 - 公開者: `npm view <name>@<version> _npmUser maintainers dist.attestations --json` を、今の版と新しい版で比べる。次のどれかなら要判断にする
   - 新しい版の `_npmUser` が、今の版の `maintainers` にいない
   - 今の版に provenance（`dist.attestations`）があるのに、新しい版にない
@@ -24,44 +24,20 @@
 
   人から `GitHub Actions` に変わり、新しい版に provenance があるもの（trusted publishing への移行）は通す。`GitHub Actions` として公開された版は、npm 側に登録したリポジトリとワークフローからしか出せないので、盗まれたトークンで人の名前で公開される版より確かめやすい
 
-## lockfile への適用
+## 推移依存の脆弱性
 
-依存のコードを動かす前に lockfile の中身を確かめるため、まず lockfile だけを更新する。
+package.json に書かれていない依存（推移依存）の advisory で、直す Dependabot の PR がないものは、巡回は直さずに見込みを書いて要判断にする。人が直す。
 
-| パッケージマネージャー | 方法 |
-|---|---|
-| pnpm | 下の 2 段で package.json を書き換え、それぞれのあとに `pnpm install --lockfile-only --ignore-scripts` |
-| npm | 下の 2 段で package.json を書き換え、それぞれのあとに該当ディレクトリで `npm install --package-lock-only --ignore-scripts` |
-| yarn | 要判断（巡回の対象外） |
-
-1. 記号を外した意図した版にして lockfile を更新する（例: `^1.2.3` を `1.2.4`）。lockfile の解決先が意図した版になる
-2. 元の記号を付けた版に戻して、もう一度 lockfile を更新する（`^1.2.4`）。解決済みの版が範囲を満たすので、意図した版のまま残る
-
-1 段目を飛ばして `^1.2.4` に直接書き換えると、pnpm・npm とも範囲内の最新（4 日未満を含む）に解決する。2 段のあとで、lockfile の解決先が意図した版であることを確かめる。
-
-- 意図した版は範囲の最小値にする（例: `^1.2.4` の 1.2.4）
-- 書き換えてよいのは、`^1.2.3`・`~1.2.3`・`1.2.3`（npm alias なら同じ alias 先）の形の値の版だけ。最終的に記号は変えない（1 段目の記号を外した状態は作業ツリーでだけ許され、push の前の検査では元の記号に戻っている必要がある）。`workspace:`・範囲指定・git などの値は変えない。prerelease（`-rc.1` など）にはしない
-- overrides は既存のキーの版を上げるだけにする。推移依存は先に下の「推移依存の更新」を見て、修正版が親の範囲の外にあり overrides を足す必要があるときは要判断にする
-- 適用したら、lockfile の差分で目的の依存以外の版が動いていないかを見る。動いていて戻せなければ要判断にする
-- 最後に `check-diff.mjs` を通す（push の前に guard も通す）。依存や overrides の追加・削除、版下げ、記号や alias 先の変更、scripts などの変更、レジストリ以外からの解決、同じ版の integrity の変更を拒否する
-
-## 推移依存の更新
-
-package.json に書かれていない依存（推移依存）は、セキュリティの修正のときだけ上げる。lockfile だけを変える Dependabot の PR もこの方法で取り込む。package.json は変えない。修正版が親の指定範囲（`^7.29.0` など）に入っていれば overrides は要らない。npm の lockfile では要判断にする。
-
-pnpm は推移依存に版を指定できず、範囲内の最新に解決する。そのため、動かす前に解決先を読み取りで見込む。
+pnpm は推移依存に版を指定できず、範囲内の最新に解決する。見込みは読み取りで出す。
 
 1. `pnpm why <name>` で、その依存を使う親と版を出す
-2. 親ごとに `npm view <親>@<版> dependencies --json` で範囲を見て、`npm view <name> time --json` から範囲内の最新の版と公開日を出す。それが解決先になる
-3. 解決先が修正版に届かなければ、親の更新か overrides が要る。要判断にする
-4. 解決先が公開から 4 日未満なら、見送り中として報告する（4 日を過ぎた日の巡回で上げる）
-5. `pnpm update <name> --no-save --lockfile-only --ignore-scripts` で lockfile を更新する。同じ依存の別のメジャーも、それぞれの範囲内の最新に上がる
-6. lockfile に新しく入った版が見込みどおりかを見る。目的の依存以外で動いてよいのは、lockfile にすでにあった版へのそろえ（重複の解消）だけ。それ以外の版が入っていたら push せず要判断にする
-7. `pnpm audit` で advisory が消えたことを確かめる
+2. 親ごとに `npm view <親>@<版> dependencies --json` で範囲を見て、`npm view <name> time --json` から範囲内の最新の版と公開日を出す
+3. それが修正版に届いていて公開から 4 日を満たすなら、「`pnpm update <name> --lockfile-only` で <版> に上がる見込み」と書く。4 日未満なら、4 日を満たす日を書く
+4. 届かなければ、親の更新か overrides が要ると書く
 
 ## よくある落とし穴
 
 - 同じ依存を複数の package.json で宣言している monorepo では、すべて同じ版にそろえる
 - 同じ advisory が別の lockfile（サブディレクトリの独立したプロジェクトなど）にもあることがある。設定の「lockfile の場所」をすべて見る
-- biome を上げたら `biome.json` の `$schema` も同じ版にする（設定で `biome.json` を追加パスとして許している場合だけ。許していなければ要判断）
+- biome を上げる PR は `biome.json` の `$schema` が古いまま残る。CI が落ちていれば、それを要判断に書く（設定で `biome.json` を追加パスとして許していれば、人がその PR に足しても dependency-check は通る）
 - 対で上げる依存（同じスコープの関連パッケージなど）は、片方だけ上げない

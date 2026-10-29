@@ -6,3 +6,7 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 4
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
