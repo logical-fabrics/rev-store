@@ -106,7 +106,7 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 ### 2. 棚卸し
 
 - open の PR を、Dependabot の PR と人の PR に分ける。Dependabot の PR は、npm 系（変更ファイルが package.json と pnpm / npm の lockfile）と、それ以外（GitHub Actions・cargo・docker など）に分ける
-- セキュリティ情報: Dependabot アラートを読む（403 なら飛ばす）。アラートが読めても、設定の「lockfile の場所」ごとに、その lockfile のディレクトリに `cd` してから audit を取る（`cd <ディレクトリ> && pnpm audit --json > /tmp/repo-patrol/audit-<名前>.json`、npm なら `npm audit --json`。`--dir` は使わない: Actions の corepack は今のディレクトリの `package.json` の `packageManager` で pnpm の版を決めるので、root に `package.json` がないと版が食い違って止まる）。アラートに出ない advisory や、公開から日が浅くまだアラートになっていない advisory が audit には出る。どちらも取れなければ「セキュリティ情報を取得できなかった」を要判断にする
+- セキュリティ情報: Dependabot アラートを読む（403 なら飛ばす）。アラートが読めても、設定の「lockfile の場所」ごとに、その lockfile のディレクトリに `cd` してから audit を取る（`cd <ディレクトリ> && pnpm audit --json > /tmp/repo-patrol/audit-<名前>.json`、npm なら `npm audit --json`。`--dir` は使わない: Actions の corepack は今のディレクトリの `package.json` の `packageManager` で pnpm の版を決めるので、root に `package.json` がないと版が食い違って止まる。Bash の作業ディレクトリは呼び出しをまたいで残るので、audit のあとは `cd` でリポジトリの root に戻る。スクリプトはどれも root から呼ぶ）。アラートに出ない advisory や、公開から日が浅くまだアラートになっていない advisory が audit には出る。どちらも取れなければ「セキュリティ情報を取得できなかった」を要判断にする
 - audit の結果は `node .claude/skills/repo-patrol/scripts/audit-summary.mjs /tmp/repo-patrol/audit-<名前>.json` で読む。advisory ごとに入っている版をすべて並べ、直接依存か推移依存かを出す。同じ advisory が直接依存と推移依存の両方に当たることがあるので、jq で findings の先頭だけを見て判断しない
 
 ### 3. Dependabot の PR を見る
