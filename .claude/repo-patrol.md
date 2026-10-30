@@ -16,7 +16,7 @@ CI
 
 - `pnpm-lock.yaml`
 
-pnpm は cloud environment の setup script で、`package.json` の `packageManager` と同じ版を入れてある（corepack は使わない）。
+pnpm は、Actions の巡回では corepack が `package.json` の `packageManager` の版を使う。
 
 ## 差分に含めてよい追加のパス
 

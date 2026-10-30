@@ -7,7 +7,7 @@
 | 種類 | 扱い |
 |---|---|
 | npm 系以外（GitHub Actions・cargo・docker など） | CI の状態を添えてマージ待ちとして報告し、人がそのままマージする |
-| npm 系の patch / minor（groups で 1 本にまとまる） | CI と dependency-check が通っていればマージ待ちとして報告する。dependency-check が公開から 4 日未満で落ちていれば見送り中にする（4 日たったら人が re-run する） |
+| npm 系の patch / minor（groups で 1 本にまとまる） | CI と dependency-check が通っていればマージ待ちとして報告する。dependency-check が公開から 4 日未満で落ちていれば見送り中にする（head のコミットから 4 日たつと、検査の workflow が自動で再実行する） |
 | npm 系のメジャー | マージ待ちにしない。理由（移行が必要か、peer 依存の都合か）を 1 回だけコメントし、見送り中として報告する |
 | セキュリティ（アラート・audit・本文に GHSA / CVE） | 直す Dependabot の PR（セキュリティ更新は cooldown を待たずに来る）があれば、それを見る。なければ下の「推移依存の脆弱性」に沿って見込みを書き、要判断（`security: true`）にする |
 | グループ PR（複数の依存をまとめたもの） | 中身を 1 つずつ上の基準で判断する。範囲内の最新化で新しく入った版も、dependency-check が 1 つずつ公開者・install script・公開日を確かめる |
@@ -20,9 +20,9 @@
 - 公開者: `npm view <name>@<version> _npmUser maintainers dist.attestations --json` を、今の版と新しい版で比べる。次のどれかなら要判断にする
   - 新しい版の `_npmUser` が、今の版の `maintainers` にいない
   - 今の版に provenance（`dist.attestations`）があるのに、新しい版にない
-  - 今の版は `GitHub Actions`（trusted publishing）が公開しているのに、新しい版は人が公開している
+  - 今の版は trusted publishing（`_npmUser` が `GitHub Actions` か `GitLab CI/CD`）で公開されているのに、新しい版は人が公開している
 
-  人から `GitHub Actions` に変わり、新しい版に provenance があるもの（trusted publishing への移行）は通す。`GitHub Actions` として公開された版は、npm 側に登録したリポジトリとワークフローからしか出せないので、盗まれたトークンで人の名前で公開される版より確かめやすい
+  人から trusted publishing に変わり、新しい版に provenance があるもの（trusted publishing への移行）は通す。trusted publishing の版は、npm 側に登録したリポジトリとワークフロー（パイプライン）からしか出せないので、盗まれたトークンで人の名前で公開される版より確かめやすい
 
 ## 推移依存の脆弱性
 

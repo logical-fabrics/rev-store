@@ -14,6 +14,7 @@
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { annotateFailures } from "./annotations.mjs";
 import { npmResolutions, pnpmResolutions } from "./lockfile.mjs";
 
 const MIN_AGE_DAYS = 4;
@@ -24,7 +25,8 @@ const LOCKFILES = new Set([
   "package-lock.json",
   "npm-shrinkwrap.json",
 ]);
-const TRUSTED_PUBLISHER = "GitHub Actions";
+// trusted publishing で公開された版の _npmUser の名前
+const TRUSTED_PUBLISHERS = new Set(["GitHub Actions", "GitLab CI/CD"]);
 const REGISTRY = "https://registry.npmjs.org/";
 
 const [base] = process.argv.slice(2);
@@ -120,6 +122,12 @@ for (const file of lockfiles) {
 }
 
 const problems = [];
+// 理由の種類 → 名前@版（annotations に使う）
+const byKind = new Map();
+const fail = (kind, spec, detail) => {
+  problems.push(`${spec}: ${detail}`);
+  byKind.set(kind, [...(byKind.get(kind) ?? []), spec]);
+};
 try {
   for (const [spec, { name, version, previous }] of added) {
     const next = view(spec);
@@ -128,58 +136,78 @@ try {
     for (const hook of INSTALL_SCRIPTS) {
       const command = next.scripts?.[hook];
       if (command !== undefined && command !== prev?.scripts?.[hook]) {
-        problems.push(
-          `${spec}: ${hook} が${prev ? `前の版（${previous}）から増えた・変わった` : "ある"}（${command}）`,
+        fail(
+          "install script が増えた・変わった",
+          spec,
+          `${hook} が${prev ? `前の版（${previous}）から増えた・変わった` : "ある"}（${command}）`,
         );
       }
     }
 
     const published = Date.parse(next.time?.[version] ?? "");
     if (Number.isNaN(published)) {
-      problems.push(`${spec}: 公開日が分からない`);
+      fail("公開日が分からない", spec, "公開日が分からない");
     } else if (Date.now() - published < MIN_AGE_DAYS * DAY_MS) {
-      problems.push(
-        `${spec}: 公開から ${MIN_AGE_DAYS} 日たっていない（${new Date(published).toISOString()}）`,
+      fail(
+        `公開から ${MIN_AGE_DAYS} 日たっていない`,
+        spec,
+        `公開から ${MIN_AGE_DAYS} 日たっていない（${new Date(published).toISOString()}）`,
       );
     }
 
     if (prev) {
       const user = personName(next._npmUser);
-      const trusted = user === TRUSTED_PUBLISHER;
-      const prevTrusted = personName(prev._npmUser) === TRUSTED_PUBLISHER;
+      const trusted = TRUSTED_PUBLISHERS.has(user);
+      const prevTrusted = TRUSTED_PUBLISHERS.has(personName(prev._npmUser));
       const provenance = Boolean(next.dist?.attestations);
       const prevProvenance = Boolean(prev.dist?.attestations);
       if (!(trusted && provenance)) {
         if (prevTrusted && !trusted) {
-          problems.push(
-            `${spec}: 前の版は trusted publishing だったのに、${user || "公開者が分からない"} が公開している`,
+          fail(
+            "trusted publishing から人の公開に変わった",
+            spec,
+            `前の版は trusted publishing だったのに、${user || "公開者が分からない"} が公開している`,
           );
         } else if (
           !trusted &&
           !(prev.maintainers ?? []).map(personName).includes(user)
         ) {
-          problems.push(
-            `${spec}: 公開者 ${user || "（不明）"} が前の版（${previous}）の maintainers にいない`,
+          fail(
+            "公開者が前の版の maintainers にいない",
+            spec,
+            `公開者 ${user || "（不明）"} が前の版（${previous}）の maintainers にいない`,
           );
         }
         if (prevProvenance && !provenance) {
-          problems.push(`${spec}: 前の版にあった provenance がない`);
+          fail(
+            "provenance がなくなった",
+            spec,
+            "前の版にあった provenance がない",
+          );
         }
       }
     }
   }
 } catch (error) {
   console.error(`npm に問い合わせられなかった: ${error.message}`);
+  annotateFailures("publisher-check", [
+    ["npm に問い合わせられなかった", [error.message]],
+  ]);
   process.exit(2);
 }
 
 for (const key of unreadable) {
-  problems.push(`${key}: lockfile の鍵から名前と版を読めない`);
+  fail(
+    "lockfile の鍵から名前と版を読めない",
+    key,
+    "lockfile の鍵から名前と版を読めない",
+  );
 }
 console.log(`新しく入る版: ${added.size} 件`);
 if (problems.length > 0) {
   console.log("確かめが要る版がある:");
   for (const problem of problems) console.log(`  ${problem}`);
+  annotateFailures("publisher-check", byKind);
   process.exit(1);
 }
 console.log("公開者・install script・公開日に問題はない");

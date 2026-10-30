@@ -3,6 +3,7 @@
 # 人が次を置くまでは動かない（docs/repo-patrol.md の「Actions で動かす」）:
 #   secrets.CLAUDE_CODE_OAUTH_TOKEN（claude setup-token で作る。持ち主のサブスクの枠を使う）・secrets.SLACK_BOT_TOKEN
 #   vars.REPO_PATROL_MODE: observe（GitHub に書かず、Slack にも投稿しない。報告は job summary）か live
+#   vars.REPO_PATROL_PNPM（任意）: package.json に packageManager がないとき、巡回が使う pnpm の版
 name: repo-patrol
 
 on:
@@ -44,9 +45,21 @@ jobs:
         with:
           node-version: 24
 
-      # 巡回は pnpm audit だけを使う（install はしない）。版は packageManager に合わせる
-      - name: Enable Corepack
-        run: corepack enable
+      # 巡回は pnpm audit だけを使う（install はしない）。版は packageManager に合わせる。
+      # packageManager がないリポジトリは vars.REPO_PATROL_PNPM に版を置く（corepack は最新の pnpm を使ってしまう）
+      - name: Setup pnpm
+        run: |
+          if [ -z "$PNPM_VERSION" ]; then
+            corepack enable
+          elif [[ "$PNPM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            npm install -g "pnpm@$PNPM_VERSION"
+            pnpm -v
+          else
+            echo "REPO_PATROL_PNPM は 10.34.7 のような版にする: $PNPM_VERSION" >&2
+            exit 1
+          fi
+        env:
+          PNPM_VERSION: ${{ vars.REPO_PATROL_PNPM }}
 
       - name: Patrol
         uses: anthropics/claude-code-action@v1
