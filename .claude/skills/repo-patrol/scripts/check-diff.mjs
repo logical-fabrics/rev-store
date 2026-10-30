@@ -18,7 +18,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { npmResolutions, pnpmResolutions } from "./lockfile.mjs";
+import { annotateFailures } from "./annotations.mjs";
+import {
+  normalizePnpmKeys,
+  npmResolutions,
+  PNPM_KEY,
+  pnpmResolutions,
+} from "./lockfile.mjs";
 
 const LOCKFILES = new Set([
   "pnpm-lock.yaml",
@@ -43,10 +49,9 @@ const PNPM_FLOW_LINES = [
   /^ {4,}engines: \{[^{}[\]]*\}$/,
   /^ {4,}(?:cpu|os|libc): \[[^{}[\]]*\]$/,
 ];
-// 鍵: 引用符付きか、YAML の記号で始まらない語。値は「鍵: 値」の値の部分。
+// 値は「鍵: 値」の値の部分。
 // 鍵は最初の「: 」か行末の「:」まで（overrides の鍵は「jws@>=4.0.0 <4.0.1」のように空白を含む）。
-const PNPM_KEY_VALUE =
-  /^ {2,}('(?:[^'{}[\]]|'')+'|[\w.@/()+-][^'"{}[\]&*!|%`#,]*?):(?: (.+))?$/;
+const PNPM_KEY_VALUE = new RegExp(`^ {2,}(${PNPM_KEY}):(?: (.+))?$`);
 const PNPM_LIST_ITEM = /^ {4,}- (.+)$/;
 // 引用符付きの文字列か、YAML の特殊記法（アンカー・タグ・ブロック・フロー・コメント）を含まない値。
 const YAML_SCALAR =
@@ -141,6 +146,9 @@ for (const file of changed) {
 if (problems.length > 0) {
   console.log("既存の依存の版の更新以外の変更がある:");
   for (const problem of problems) console.log(`  ${problem}`);
+  annotateFailures("check-diff", [
+    ["既存の依存の版の更新以外の変更がある", problems],
+  ]);
   process.exit(1);
 }
 console.log("既存の依存の版の更新だけ");
@@ -269,7 +277,7 @@ function canonical(value) {
 
 function checkLockfile(file) {
   const isPnpm = path.basename(file) === "pnpm-lock.yaml";
-  const { before, after, afterText, beforeText, problem } = readBoth(
+  const { before, after, problem, ...texts } = readBoth(
     file,
     isPnpm ? pnpmResolutions : npmResolutions,
   );
@@ -278,6 +286,9 @@ function checkLockfile(file) {
     return ["この形式の lockfile は巡回で扱わない"];
   }
 
+  const [beforeText, afterText] = isPnpm
+    ? [normalizePnpmKeys(texts.beforeText), normalizePnpmKeys(texts.afterText)]
+    : [texts.beforeText, texts.afterText];
   const problems = isPnpm ? checkPnpmLines(beforeText, afterText) : [];
   for (const [key, resolution] of after) {
     const previous = before.get(key);

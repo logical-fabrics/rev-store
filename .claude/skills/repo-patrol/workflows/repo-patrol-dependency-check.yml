@@ -7,6 +7,10 @@ name: repo-patrol dependency check
 # そのかわり、PR のコードは決して実行しない。PR のチェックアウトは git で読むだけにし、install・run・PR のスクリプトを足さない
 on:
   pull_request_target:
+  # 公開から 4 日未満で落ちた検査を、4 日たったら再実行する（recheck のジョブ）。08:37 JST: close の 08:17 と巡回の 09:07 の間
+  schedule:
+    - cron: "37 23 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,3 +46,32 @@ jobs:
         run: node "$RUNNER_TEMP/base/.claude/skills/repo-patrol/scripts/dependency-check.mjs" "$BASE_SHA"
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # 落ちた理由を annotations にも出す（巡回は check run の annotations で読む）
+          REPO_PATROL_ANNOTATE: "1"
+
+  recheck:
+    # PR のイベントでは動かない（schedule と手動だけ）
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 再実行（actions: write）は、このジョブにだけ与える。PR のコードは読みも実行もしない
+    permissions:
+      contents: read
+      actions: write
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Re-run the checks that waited for the age of the versions
+        run: node .claude/skills/repo-patrol/scripts/recheck.mjs "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -91,8 +91,8 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 - Dependabot アラート: `gh api --paginate "repos/<REPO>/dependabot/alerts?state=open&per_page=100"`
 - 既定ブランチのワークフロー実行: `gh api "repos/<REPO>/actions/runs?branch=<BASE>&event=push&per_page=50"`
 - 失敗したジョブのステップ: `gh api repos/<REPO>/actions/jobs/<check_run_id>`
-- check run の annotations: `gh api repos/<REPO>/check-runs/<check_run_id>/annotations`
-- ジョブのログ: `gh api repos/<REPO>/actions/jobs/<check_run_id>/logs`（クラウドでは取れないことがある。取れなければ失敗したステップ名とリンクを報告する）
+- check run の annotations: `gh api repos/<REPO>/check-runs/<check_run_id>/annotations`（dependency-check は、落ちた理由を種類ごとに 1 件ずつここに出す）
+- ジョブのログ: `gh api repos/<REPO>/actions/jobs/<check_run_id>/logs --allow-escape-sequences > /tmp/repo-patrol/log-<check_run_id>.txt`（ログは色の制御文字を含むので、`--allow-escape-sequences` がないと gh が出力しない。JSON ではないので `--jq` は付けない。長いので、ファイルに書いて `tail` や `grep` で読む。取れなければ失敗したステップ名とリンクを報告する）
 
 ## 手順
 
@@ -116,7 +116,7 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 1. マージ待ちにしないもの（メジャー更新、設定の見送り表にあるもの）は、まだ巡回のコメント（本文に `<!-- repo-patrol -->` か `— repo-patrol` を含むもの。書いた人の名前では見分けない）がなければ、理由と見直す条件を 1 回だけコメントする。本文の先頭に `<!-- repo-patrol -->` を付ける。PR は作成から 30 日で自動で閉じる（次の版が出れば Dependabot が出し直す）ことも書き、「open のまま残す」とは書かない。どちらも `notes.deferred` に並べる（今回コメントしたものは、`commentedNow: true` の要判断にもする）
 2. それ以外の npm 系の PR（minor・patch のグループや、1 つずつの PR）は、`.claude/skills/repo-patrol/scripts/wait-checks.sh <REPO> <番号> '<設定の CI のワークフロー>,repo-patrol dependency check'` を 1 回だけ呼ぶ（既定の 9 分。ワークフロー名は空白を含むので単一引用符で囲む。設定の CI が「なし」なら `'repo-patrol dependency check'` だけを渡す。`-` は 1 つだけで渡したときにしか「待つワークフローがない」の意味にならない）。終了コードは 0 成功・1 失敗・3 時間切れ・4 コンフリクト・5 チェックがない・6 GitHub API の失敗・64 引数の誤り（直して呼び直す）
    - 0・3 なら `merge` 項目にする（`ci` は `success` か `pending`）。3 は呼び直さない（翌日の巡回でまた見る）
-   - 1 なら、落ちたのが dependency-check か CI かを失敗したジョブで確かめる。dependency-check なら、check の出力（annotations かジョブのログ）にある理由を添えて要判断にする（公開から 4 日未満だけが理由なら見送り中にし、4 日たったら人が re-run すると書く）。CI なら `ci: "failure"` の `merge` 項目にし、失敗したジョブのステップ名を `label` に短く添える
+   - 1 なら、落ちたのが dependency-check か CI かを失敗したジョブで確かめる。dependency-check なら、check run の annotations にある理由を添えて要判断にする（annotations がなければジョブのログを読む）（公開から 4 日未満だけが理由なら見送り中にし、「head のコミットから 4 日たつと自動で再実行される」と書く）。CI なら `ci: "failure"` の `merge` 項目にし、失敗したジョブのステップ名を `label` に短く添える
    - 4 なら `merge` 項目の `label` に「コンフリクト」と書き、`ci: "unknown"` にする（Dependabot が rebase する）。5・6 は `ci: "unknown"`
    - `merge` 項目の `ageDays` は作成からの日数。`isNew` は作成の日（0 日）、`nudge` は作成から 7 日ごと（7・14・21 日目…）に true
 3. npm 系以外の Dependabot の PR は、`wait-checks.sh <REPO> <番号> - 0` で CI の状態だけを見て `merge` 項目にする
@@ -135,7 +135,7 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 
 ### 6. Slack に報告する
 
-報告は事実だけを JSON で書き、`/tmp/repo-patrol/report.json` に Write ツールで置く。件数・見出し・@channel・投稿するかは `slack-post.sh` が決める。
+報告は事実だけを JSON で書き、`/tmp/repo-patrol/report.json` に Write ツールで置く。件数・見出し・深刻さの印・並び・@channel・投稿するか・スレッドの返信は `slack-post.sh` が決める。親の投稿は、深刻さの印を付けた見出し、件数の欄、種類ごとに 5 件までの 1 件 1 行になる。5 件を超えた分・見送り中・既定ブランチの CI・実行ログは、そのスレッドの返信に並ぶ。
 
 1. `.claude/skills/repo-patrol/scripts/slack-post.sh --check /tmp/repo-patrol/report.json` で形を確かめる（投稿しない。何度呼んでもよい）。exit 1 なら、出力の理由に沿って直す
 2. `.claude/skills/repo-patrol/scripts/slack-post.sh /tmp/repo-patrol/report.json` を 1 回だけ呼ぶ。報告することがない日は、スクリプトが投稿せずに「報告することがないので投稿しなかった」と出す（月曜だけは「異常なし」を投稿する）。投稿に失敗したら、セッションの最後にそのことを書いて終える（ほかに知らせる手段はない）
@@ -158,8 +158,9 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 }
 ```
 
-- `date` は `date +%F` の値、`base` は `<BASE>`、`sessionUrl` は `<SESSION_URL>`。`base` と `sessionUrl` は分からなければ省く
+- `date` は `date +%F` の値、`base` は `<BASE>`、`sessionUrl` は `<SESSION_URL>`。`base` と `sessionUrl` は分からなければ省く（Actions では、省いても今の実行の URL が付く）
 - `items` は人が動くもの。1 項目が 1 行になり、項目の数が見出しの「要対応 N 件」になる。キーは全部書く（`?` の付いたものは省いてよい）
+- `ci: "failure"` の `merge` は、スクリプトが「CI 失敗」に数えて先頭に並べる（マージ待ちには入れない）。`label` に失敗したステップ名を添えておく
 
 | kind | 使う場面 | キー |
 |---|---|---|
@@ -169,7 +170,7 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 | `closing_soon` | 7 日以内に閉じる予定（`stale.sh list` の notice と notice-first） | `number`、`title`、`firstNotice`（notice-first） |
 
 - `notes` は添えるだけのもので、どれも省いてよい。`deferred` は見送り中（`number?`・`label`・`reason`）、`baseCi` は手順 5
-- 見送り中のものは毎回 `notes.deferred` に並べる。それだけでは投稿もメンションもされない
+- 見送り中のものは毎回 `notes.deferred` に並べる（スレッドの返信に出る）。それだけでは投稿もメンションもされない
 - @channel が付くのは、`isNew`・`commentedNow`・`security`・`nudge`・`firstNotice` のどれかが true の項目があるときだけ
 - `label`・`reason`・`title` は 300 文字以内の 1 行。番号・名前・版・状態を先に、理由を後ろに短く書く。パッケージ名はバッククォートで囲む。`#<番号>` はこのリポジトリの Issue / PR へのリンクになる
 - スクリプトが `&` `<` `>` をエスケープするので、Slack のリンク記法やメンションは書けない

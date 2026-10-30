@@ -14,12 +14,40 @@ function pnpmPackage(key) {
 const registryTarball = (name, version) =>
   `https://registry.npmjs.org/${name}/-/${name.split("/").at(-1)}-${version}.tgz`;
 
+// pnpm-lock.yaml の鍵: 引用符付きか、YAML の記号で始まらない語。check-diff の行の検査も使う
+export const PNPM_KEY = /'(?:[^'{}[\]]|'')+'|[\w.@/()+-][^'"{}[\]&*!|%`#,]*?/
+  .source;
+const EXPLICIT_KEY = new RegExp(`^ {2}\\? (${PNPM_KEY})$`);
+const EXPLICIT_VALUE = /^ {2}: (\{\}|[A-Za-z]+:(?: .+)?)$/;
+
+// pnpm は 1024 文字を超える鍵（peer の括弧が深い snapshots の鍵）を、「? 鍵」と「: 値」の 2 行で書く。
+// 2 字下げの組だけを「鍵: 値」の形に直す。組にならないものは残し、check-diff の行の検査で落とす
+export function normalizePnpmKeys(text) {
+  const lines = text.split("\n");
+  const normalized = [];
+  for (let i = 0; i < lines.length; i++) {
+    const key = lines[i].match(EXPLICIT_KEY);
+    const value = key ? lines[i + 1]?.match(EXPLICIT_VALUE) : null;
+    if (!value) {
+      normalized.push(lines[i]);
+      continue;
+    }
+    normalized.push(
+      ...(value[1] === "{}"
+        ? [`  ${key[1]}: {}`]
+        : [`  ${key[1]}:`, `    ${value[1]}`]),
+    );
+    i++;
+  }
+  return normalized.join("\n");
+}
+
 // pnpm-lock.yaml の packages: から「パッケージの鍵 → resolution」を取り出す。
 export function pnpmResolutions(text) {
   const resolutions = new Map();
   let inPackages = false;
   let key = null;
-  for (const line of text.split("\n")) {
+  for (const line of normalizePnpmKeys(text).split("\n")) {
     if (/^\S/.test(line)) {
       inPackages = line.trim() === "packages:";
       key = null;

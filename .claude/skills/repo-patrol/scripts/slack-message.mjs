@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // 巡回の報告（JSON）を検証し、chat.postMessage に送る JSON にする。slack-post.sh から呼ぶ。
 // usage: node slack-message.mjs <報告の JSON> <チャンネル> <owner/name>
-// 出力: {"rich": Block Kit の本文, "plain": 文字だけの本文}。投稿しない日（items が空で月曜でない日）は null
+// 出力: {"rich": Block Kit の本文, "plain": 文字だけの本文, "reply": スレッドの返信の {rich, plain} か null}。
+//   投稿しない日（items が空で月曜でない日）は null。
 //   Block Kit が拒否されたら、slack-post.sh が plain で送り直す。ブロックが 50 を超えるときは rich も文字だけにする
-// 報告の形は SKILL.md の手順 7。巡回は事実だけを書き、件数・@channel・投稿するかはここで決める。
+// 親の投稿は、深刻さの印（🔴 CI 失敗・🟡 要判断・🟢 それ以外）を付けた見出し、件数の欄、種類ごとに 5 件までの 1 件 1 行。
+// 5 件を超えた分・見送り中・既定ブランチの CI・実行ログは、スレッドの返信に並べる。
+// 報告の形は SKILL.md の手順 6。巡回は事実だけを書き、件数・色・並び・@channel・投稿するかはここで決める。
 // 形に合わなければ、理由を標準エラーに出して exit 1（巡回は直して呼び直す）
 //
 // 報告には Issue の題名など外から来た文字が入るので:
@@ -90,15 +93,13 @@ const REPORT_FIELDS = {
   notes: "object?",
 };
 
-// 並びは深刻な順。mentions は、どれかが true なら @channel を付けるキー
+// mentions は、どれかが true なら @channel を付けるキー
 const KINDS = {
   ci_failure: {
-    heading: (base) => `:x: ${base} の CI が失敗`,
     fields: { workflow: "text", url: "text", isNew: "boolean" },
     mentions: ["isNew"],
   },
   decision: {
-    heading: () => ":thinking_face: 要判断",
     fields: {
       number: "number?",
       label: "text",
@@ -109,7 +110,6 @@ const KINDS = {
     mentions: ["commentedNow", "security"],
   },
   merge: {
-    heading: () => ":eyes: マージしてください",
     fields: {
       number: "number",
       label: "text",
@@ -121,7 +121,6 @@ const KINDS = {
     mentions: ["isNew", "nudge"],
   },
   closing_soon: {
-    heading: () => ":hourglass_flowing_sand: 7 日以内に閉じる予定",
     fields: { number: "number", title: "text", firstNotice: "boolean" },
     mentions: ["firstNotice"],
   },
@@ -220,6 +219,29 @@ function chunk(texts) {
   return chunks;
 }
 
+const MAX_LINES = 5;
+// Slack の text の上限（40,000 文字）より短く
+const MESSAGE_LIMIT = 39000;
+// 見出しの先頭の印で深刻さを示す（attachments の色の帯は、長いと Slack が「もっと表示する」で畳むので使わない）
+const MARKS = { failure: "🔴", decision: "🟡", ok: "🟢" };
+const MERGE_ICONS = {
+  success: "✅",
+  pending: "⏳",
+  unknown: "❔",
+  failure: "❌",
+};
+
+// 実行ログの URL。報告になければ、Actions の上では今の実行の URL を使う
+function runUrl(report, repo) {
+  if (report.sessionUrl) return report.sessionUrl;
+  const { GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = process.env;
+  return GITHUB_SERVER_URL === "https://github.com" &&
+    GITHUB_REPOSITORY?.toLowerCase() === repo.toLowerCase() &&
+    /^\d+$/.test(GITHUB_RUN_ID ?? "")
+    ? `https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`
+    : null;
+}
+
 function render(report, channel, repo) {
   const mrkdwn = (text) => {
     // Slack は空白以外（「（」や「・」など）に続くバッククォートをコードにしないので、前に空白を入れる
@@ -240,62 +262,119 @@ function render(report, channel, repo) {
     `^https://github\\.com/${repo.replaceAll(".", "\\.")}/actions/runs/\\d+(?:/job/\\d+)?$`,
     "i",
   );
+  const base = report.base ?? "既定ブランチ";
   const lines = {
     ci_failure: (item) =>
       actionsRun.test(item.url)
-        ? `<${item.url}|${escapeMarkup(oneLine(item.workflow))}>`
-        : mrkdwn(`${item.workflow}: ${item.url}`),
+        ? `❌ ${mrkdwn(`${base} の CI`)}: <${item.url}|${escapeMarkup(oneLine(item.workflow))}>`
+        : `❌ ${mrkdwn(`${base} の CI: ${item.workflow}（${item.url}）`)}`,
     decision: (item) =>
-      mrkdwn(`${ref(item.number)}${item.label}: ${item.reason}`),
+      `🤔 ${mrkdwn(`${ref(item.number)}${item.label}: ${item.reason}`)}`,
+    // アイコンが CI の状態を表すので、成功のときは文字で書かない
     merge: (item) =>
-      mrkdwn(
+      `${MERGE_ICONS[item.ci]} ${mrkdwn(
         [
           `${ref(item.number)}${item.label}`,
           ...(item.ageDays > 0 ? [`作成から ${item.ageDays} 日`] : []),
-          `CI ${CI_STATES[item.ci]}`,
+          ...(item.ci === "success" ? [] : [`CI ${CI_STATES[item.ci]}`]),
         ].join("・"),
-      ),
-    closing_soon: (item) => mrkdwn(`${ref(item.number)}${item.title}`),
+      )}`,
+    closing_soon: (item) => `⌛ ${mrkdwn(`${ref(item.number)}${item.title}`)}`,
   };
 
-  const base = report.base ?? "既定ブランチ";
   const { items } = report;
   const notes = report.notes ?? {};
+  const of = (test) => items.filter(test);
+  // 並びは深刻な順。CI が落ちた Dependabot の PR は、マージ待ちではなく CI 失敗に入れる
+  const groups = [
+    [
+      "CI 失敗",
+      [
+        ...of((item) => item.kind === "ci_failure"),
+        ...of((item) => item.kind === "merge" && item.ci === "failure"),
+      ],
+    ],
+    ["要判断", of((item) => item.kind === "decision")],
+    [
+      "マージ待ち",
+      of((item) => item.kind === "merge" && item.ci !== "failure"),
+    ],
+    ["閉じる予定", of((item) => item.kind === "closing_soon")],
+  ];
+  const mark =
+    groups[0][1].length > 0
+      ? MARKS.failure
+      : groups[1][1].length > 0
+        ? MARKS.decision
+        : MARKS.ok;
+
   const mention = items.some((item) =>
     KINDS[item.kind].mentions.some((key) => item[key] === true),
   );
   const status = items.length > 0 ? `要対応 ${items.length} 件` : "異常なし";
-  const title = `${repo.split("/")[1]} の巡回（${report.date}）: ${status}`;
+  const [, month, day] = report.date.split("-").map(Number);
+  const title = `${mark} ${repo.split("/")[1]} の巡回（${month}/${day}）: ${status}`;
+  const heading = `${mention ? "<!channel> " : ""}${escapeMarkup(title)}`;
+  const counts = groups.map(([label, list]) => `${label} ${list.length}`);
 
-  const blocks = [
-    {
-      type: "header",
-      text: { type: "plain_text", text: plainText(title), emoji: true },
-    },
-  ];
-  if (mention) {
-    blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: "<!channel>", verbatim: true },
-    });
-  }
-  const fallback = [`${mention ? "<!channel> " : ""}${escapeMarkup(title)}`];
-
-  for (const [kind, { heading }] of Object.entries(KINDS)) {
-    const matching = items.filter((item) => item.kind === kind);
-    if (matching.length === 0) continue;
-    const texts = [
-      `*${mrkdwn(heading(base))}*`,
-      ...matching.map((item) => `• ${lines[kind](item)}`),
-    ];
-    for (const text of chunk(texts)) {
-      blocks.push({
-        type: "section",
-        text: { type: "mrkdwn", text, verbatim: true },
-      });
+  // 種類ごとに 5 件まで。残りはスレッドに並べる
+  const shown = [];
+  const overflow = [];
+  for (const [, list] of groups) {
+    if (list.length === 0) continue;
+    const texts = list
+      .slice(0, MAX_LINES)
+      .map((item) => lines[item.kind](item));
+    if (list.length > MAX_LINES) {
+      texts.push(`他 ${list.length - MAX_LINES} 件（スレッドに一覧）`);
+      overflow.push(
+        ...list.slice(MAX_LINES).map((item) => lines[item.kind](item)),
+      );
     }
-    fallback.push("", ...texts);
+    shown.push(texts);
   }
+
+  const section = (text) => ({
+    type: "section",
+    text: { type: "mrkdwn", text, verbatim: true },
+  });
+  const message = { channel, unfurl_links: false, unfurl_media: false };
+  // 文字だけの本文。chunk しない分、Slack の text の上限で切る
+  const plainMessage = (texts) => ({
+    ...message,
+    text: truncate(texts.join("\n"), MESSAGE_LIMIT),
+  });
+  // ブロックが 50 を超えるときは文字だけにする
+  const richMessage = (blocks, text, fallback) =>
+    blocks.length <= BLOCK_LIMIT ? { ...message, text, blocks } : fallback;
+
+  const plain = plainMessage([
+    heading,
+    counts.join("・"),
+    ...shown.flatMap((texts) => ["", ...texts]),
+  ]);
+  const rich = richMessage(
+    [
+      {
+        type: "header",
+        text: { type: "plain_text", text: plainText(title), emoji: true },
+      },
+      ...(mention ? [section("<!channel>")] : []),
+      {
+        type: "section",
+        fields: groups.map(([label, list]) => ({
+          type: "mrkdwn",
+          text: `*${label}*\n${list.length}`,
+          verbatim: true,
+        })),
+      },
+      ...(shown.length > 0 ? [{ type: "divider" }] : []),
+      ...shown.flatMap((texts) => chunk(texts).map(section)),
+    ],
+    // モバイルの通知は text だけを使うので、text には見出しとメンションを入れる
+    heading,
+    plain,
+  );
 
   const context = [];
   if (notes.deferred?.length > 0) {
@@ -309,26 +388,31 @@ function render(report, channel, repo) {
   } else if (notes.baseCi === "unknown") {
     context.push(mrkdwn(`:grey_question: ${base} の CI: 確認できなかった`));
   }
-  if (report.sessionUrl) context.push(`<${report.sessionUrl}|実行ログ>`);
-  if (context.length > 0) {
-    blocks.push({ type: "divider" });
-    for (const text of chunk(context)) {
-      blocks.push({
+  const url = runUrl(report, repo);
+  if (url) context.push(`<${url}|実行ログ>`);
+
+  let reply = null;
+  if (overflow.length > 0 || context.length > 0) {
+    const overflowTexts =
+      overflow.length > 0 ? ["*親の投稿に入らなかった項目*", ...overflow] : [];
+    const replyPlain = plainMessage([
+      ...overflowTexts,
+      ...(overflowTexts.length > 0 && context.length > 0 ? [""] : []),
+      ...context,
+    ]);
+    const replyBlocks = [
+      ...chunk(overflowTexts).map(section),
+      ...chunk(context).map((text) => ({
         type: "context",
         elements: [{ type: "mrkdwn", text, verbatim: true }],
-      });
-    }
-    fallback.push("", ...context);
+      })),
+    ];
+    reply = {
+      rich: richMessage(replyBlocks, escapeMarkup(title), replyPlain),
+      plain: replyPlain,
+    };
   }
-
-  const message = { channel, unfurl_links: false, unfurl_media: false };
-  const plain = { ...message, text: fallback.join("\n") };
-  // モバイルの通知は text だけを使うので、text には見出しとメンションを入れる
-  const rich =
-    blocks.length <= BLOCK_LIMIT
-      ? { ...message, text: fallback[0], blocks }
-      : plain;
-  return { rich, plain };
+  return { rich, plain, reply };
 }
 
 function main([file, channel, repo]) {

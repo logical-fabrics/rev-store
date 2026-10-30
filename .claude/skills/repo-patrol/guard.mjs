@@ -648,8 +648,16 @@ function checkGh(args, ctx) {
       }
       continue;
     }
+    // --allow-escape-sequences: ジョブのログは色の制御文字を含み、gh はこれがないと出力しない
     if (
-      ["--paginate", "--slurp", "-i", "--include", "--silent"].includes(arg)
+      [
+        "--paginate",
+        "--slurp",
+        "-i",
+        "--include",
+        "--silent",
+        "--allow-escape-sequences",
+      ].includes(arg)
     ) {
       continue;
     }
