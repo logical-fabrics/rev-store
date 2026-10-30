@@ -180,6 +180,23 @@ function validate(report) {
       notes.deferred.forEach((entry, index) => {
         checkFields(entry, DEFERRED_FIELDS, `notes.deferred[${index}]`, errors);
       });
+      // 見送り中のものを要判断にも並べるのは、今回コメントした日と、セキュリティの理由があるときだけ
+      const deferred = new Set(notes.deferred.map((entry) => entry?.number));
+      (Array.isArray(report.items) ? report.items : []).forEach(
+        (item, index) => {
+          if (
+            item?.kind === "decision" &&
+            item.number !== undefined &&
+            deferred.has(item.number) &&
+            item.commentedNow !== true &&
+            item.security !== true
+          ) {
+            errors.push(
+              `items[${index}] の #${item.number} は見送り中（notes.deferred）にある。今回コメントしていない見送りは要判断にしない`,
+            );
+          }
+        },
+      );
     }
   }
   return errors;
