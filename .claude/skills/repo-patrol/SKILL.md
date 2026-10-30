@@ -131,7 +131,7 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 
 ### 5. 既定ブランチの CI
 
-`<BASE>` への push で動いたワークフローごとに、最新の完了済み実行を見る（cancelled は数えない）。失敗していれば `ci_failure` 項目にする。同じワークフローの 1 つ前の実行が成功していた場合だけ、新たな失敗として `isNew: true` にする。全部成功なら `notes.baseCi` を `success`、確かめられなければ `unknown` にする。
+`<BASE>` への push で動いたワークフローごとに、最新の完了済み実行を見る（cancelled は数えない）。失敗していれば `ci_failure` 項目にする。同じワークフローの 1 つ前の実行が成功していた場合だけ、新たな失敗として `isNew: true` にする。全部成功なら `notes.baseCi` を `success`、確かめられなければ `unknown` にする。`<BASE>` への push で動くワークフローがない（CI が PR でだけ動く）なら、`notes.baseCi` は書かない。
 
 ### 6. Slack に報告する
 
