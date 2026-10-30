@@ -113,7 +113,7 @@ guard は、巡回が使う形のコマンドだけを通す。次に収まる�
 
 基準は設定の「判断基準」が指す文書。なければ `references/dependency-triage.md`。PR ごとに、作成からの日数（作成日時から数えた日数。作成の日は 0）を出す。
 
-1. マージ待ちにしないもの（メジャー更新、設定の見送り表にあるもの）は、まだ巡回のコメント（本文に `<!-- repo-patrol -->` か `— repo-patrol` を含むもの。書いた人の名前では見分けない）がなければ、理由と見直す条件を 1 回だけコメントする。本文の先頭に `<!-- repo-patrol -->` を付ける。PR は作成から 30 日で自動で閉じる（次の版が出れば Dependabot が出し直す）ことも書き、「open のまま残す」とは書かない。どちらも `notes.deferred` に並べる（今回コメントしたものは、`commentedNow: true` の要判断にもする）
+1. マージ待ちにしないもの（メジャー更新、設定の見送り表にあるもの）は、まだ巡回のコメント（本文に `<!-- repo-patrol -->` か `— repo-patrol` を含むもの。書いた人の名前では見分けない）がなければ、理由と見直す条件を 1 回だけコメントする。本文の先頭に `<!-- repo-patrol -->` を付ける。PR は作成から 30 日で自動で閉じる（次の版が出れば Dependabot が出し直す）ことも書き、「open のまま残す」とは書かない。どちらも `notes.deferred` に並べる（今回コメントしたものは、`commentedNow: true` の要判断にもする。前の日にコメントしたものは要判断にしない。`slack-post.sh` が形の誤りとして返す）
 2. それ以外の npm 系の PR（minor・patch のグループや、1 つずつの PR）は、`.claude/skills/repo-patrol/scripts/wait-checks.sh <REPO> <番号> '<設定の CI のワークフロー>,repo-patrol dependency check'` を 1 回だけ呼ぶ（既定の 9 分。ワークフロー名は空白を含むので単一引用符で囲む。設定の CI が「なし」なら `'repo-patrol dependency check'` だけを渡す。`-` は 1 つだけで渡したときにしか「待つワークフローがない」の意味にならない）。終了コードは 0 成功・1 失敗・3 時間切れ・4 コンフリクト・5 チェックがない・6 GitHub API の失敗・64 引数の誤り（直して呼び直す）
    - 0・3 なら `merge` 項目にする（`ci` は `success` か `pending`）。3 は呼び直さない（翌日の巡回でまた見る）
    - 1 なら、落ちたのが dependency-check か CI かを失敗したジョブで確かめる。dependency-check なら、check run の annotations にある理由を添えて要判断にする（annotations がなければジョブのログを読む）（公開から 4 日未満だけが理由なら見送り中にし、「head のコミットから 4 日たつと自動で再実行される」と書く）。CI なら `ci: "failure"` の `merge` 項目にし、失敗したジョブのステップ名を `label` に短く添える
