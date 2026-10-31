@@ -7,7 +7,7 @@
 // 親の投稿は、深刻さの印（🔴 CI 失敗・🟡 要判断・🟢 それ以外）を付けた見出し、件数の欄、種類ごとに 5 件までの 1 件 1 行。
 // 5 件を超えた分・見送り中・既定ブランチの CI・実行ログは、スレッドの返信に並べる。
 // 報告の形は SKILL.md の手順 6。巡回は事実だけを書き、件数・色・並び・@channel・投稿するかはここで決める。
-// 形に合わなければ、理由を標準エラーに出して exit 1（巡回は直して呼び直す）
+// 形に合わなければ、理由を標準エラーに出して exit 1（巡回は直して呼び直す）。前の日にコメントした見送りの要判断は、外して標準エラーに書く
 //
 // 報告には Issue の題名など外から来た文字が入るので:
 //   - & < > はすべてエスケープする（<!channel> やリンク記法を無効にする）
@@ -180,26 +180,32 @@ function validate(report) {
       notes.deferred.forEach((entry, index) => {
         checkFields(entry, DEFERRED_FIELDS, `notes.deferred[${index}]`, errors);
       });
-      // 見送り中のものを要判断にも並べるのは、今回コメントした日と、セキュリティの理由があるときだけ
-      const deferred = new Set(notes.deferred.map((entry) => entry?.number));
-      (Array.isArray(report.items) ? report.items : []).forEach(
-        (item, index) => {
-          if (
-            item?.kind === "decision" &&
-            item.number !== undefined &&
-            deferred.has(item.number) &&
-            item.commentedNow !== true &&
-            item.security !== true
-          ) {
-            errors.push(
-              `items[${index}] の #${item.number} は見送り中（notes.deferred）にある。今回コメントしていない見送りは要判断にしない`,
-            );
-          }
-        },
-      );
     }
   }
   return errors;
+}
+
+// 見送り中のものを要判断にも並べるのは、今回コメントした日と、セキュリティの理由があるときだけ。
+// 設定が「要判断」と書いた PR を巡回が毎日要判断にしても、報告ごと落とさずに要判断から外す（見送り中には残る）
+function withoutStaleDeferrals(report) {
+  const deferred = new Set(
+    (report.notes?.deferred ?? []).map((entry) => entry.number),
+  );
+  const items = report.items.filter((item) => {
+    const stale =
+      item.kind === "decision" &&
+      item.number !== undefined &&
+      deferred.has(item.number) &&
+      !item.commentedNow &&
+      !item.security;
+    if (stale) {
+      console.error(
+        `#${item.number} は見送り中（notes.deferred）にあり、今回コメントしていないので、要判断から外した`,
+      );
+    }
+    return !stale;
+  });
+  return { ...report, items };
 }
 
 function truncate(text, limit) {
@@ -451,6 +457,7 @@ function main([file, channel, repo]) {
     );
     return 1;
   }
+  report = withoutStaleDeferrals(report);
   // 報告することがない日も月曜は投稿し、投稿が途絶えたら巡回が止まっていると分かるようにする
   const monday = new Date(`${report.date}T00:00:00Z`).getUTCDay() === 1;
   const messages =
