@@ -556,7 +556,7 @@ function checkOwnScript(scriptPath, args, ctx) {
     if (!ctx.repo || args[0]?.toLowerCase() !== ctx.repo.toLowerCase()) {
       return block(`${parts[4]} には設定のリポジトリ（${ctx.repo}）を渡す`);
     }
-    // close は Actions の workflow（workflows/repo-patrol-stale.yml）が行う
+    // close は巡回の workflow（workflows/repo-patrol.yml）の、Claude より前の step が行う
     if (parts[4] === "stale.sh" && (args.length !== 2 || args[1] !== "list")) {
       return block(
         "stale.sh は list だけ（close は Actions の workflow が行う）",
