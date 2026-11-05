@@ -8,9 +8,10 @@
 #   - keep ラベル付きと巡回 PR（このリポジトリの claude/patrol- ブランチからの PR）は対象外
 #   - 本文に GHSA- か CVE- を含む Dependabot の PR は閉じずに hold として出す（セキュリティ更新を見えなくしないため）
 # list の出力（TSV）: 区分 番号 種類 経過日数 基準 タイトル
-#   区分: close（閉じる）/ notice（7 日以内に閉じる予定）/ notice-first（今日 notice に入った）/ hold（閉じない）
+#   区分: close（閉じる）/ notice（7 日以内に閉じる予定）/ notice-first（前回の巡回のあと notice に入った）/ hold（閉じない）
+#   巡回は平日だけなので、月曜（JST）は土日に notice に入ったものも notice-first にする
 # close は判定をやり直してから、閉じる → patrol-closed ラベル → 理由のコメント、の順に行う。
-# close は Actions の workflow（workflows/repo-patrol-stale.yml）から呼ぶ。巡回（LLM）は list だけを使う。
+# close は巡回の workflow（workflows/repo-patrol.yml）の step から呼ぶ。巡回（LLM）は list だけを使う。
 # 閉じるのは 1 日（UTC）10 件まで（失敗した試行も数える）。--max で減らせるが増やせない。
 # 終了コード: 0 成功 / 1 取得や close の失敗 / 2 閉じたがラベルかコメントに失敗したものがある
 set -euo pipefail
@@ -22,6 +23,12 @@ DAILY_CLOSE_LIMIT=10
 KEEP_LABEL=keep
 CLOSED_LABEL=patrol-closed
 PATROL_PREFIX=claude/patrol-
+# 前回の巡回からの日数。STALE_WEEKDAY（1=月〜7=日）はテストで曜日を決めるため
+if [ "${STALE_WEEKDAY:-$(TZ=Asia/Tokyo date +%u)}" = 1 ]; then
+  NOTICE_FIRST_SPAN=3
+else
+  NOTICE_FIRST_SPAN=1
+fi
 
 repo=$1
 mode=$2
@@ -42,6 +49,7 @@ classify() {
     --argjson heads "$heads" \
     --argjson stale "$STALE_DAYS" \
     --argjson notice "$NOTICE_DAYS" \
+    --argjson span "$NOTICE_FIRST_SPAN" \
     --arg keep "$KEEP_LABEL" \
     --arg prefix "$PATROL_PREFIX" \
     --arg repo "$repo" '
@@ -56,7 +64,7 @@ classify() {
     | ($dependabot and ((.body // "") | test("GHSA-|CVE-[0-9]"))) as $security
     | (if $security then (if $age >= $stale then "hold" else empty end)
        elif $age >= $stale then "close"
-       elif $age == ($stale - $notice) then "notice-first"
+       elif $age < ($stale - $notice + $span) and $age >= ($stale - $notice) then "notice-first"
        elif $age > ($stale - $notice) then "notice"
        else empty end) as $category
     | [ $category,
@@ -71,7 +79,7 @@ classify() {
 
 comment_body() {
   local kind=$1 footer="— repo-patrol"
-  # close は Actions の workflow（workflows/repo-patrol-stale.yml）が行うので、実行ログはその実行
+  # close は巡回の workflow の step が行うので、実行ログはその実行
   if [ -n "${GITHUB_RUN_ID:-}" ]; then
     footer="$footer ・ 実行ログ: ${GITHUB_SERVER_URL:-https://github.com}/${repo}/actions/runs/${GITHUB_RUN_ID}"
   fi

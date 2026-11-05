@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 公開から 4 日未満の版で落ちた依存の検査を、4 日たったら 1 回だけ再実行する。
-// usage: node recheck.mjs <owner/repo>（workflows/repo-patrol-dependency-check.yml の schedule から呼ぶ）
+// usage: node recheck.mjs <owner/repo>（巡回の workflow（workflows/repo-patrol.yml）の step から呼ぶ。人が手で呼んでもよい）
 // 終了コード: 0 成功 / 1 取得か再実行の失敗
 //
 // Dependabot の cooldown は更新する直接の依存にしか効かないので、グループの PR は作られた日に
