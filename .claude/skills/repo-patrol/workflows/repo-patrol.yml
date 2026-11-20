@@ -2,6 +2,7 @@
 # 30 日を過ぎたものの close と、公開日で落ちた依存の検査の再実行も、同じ job の step で行う（job ごとに 1 分単位で課金されるため 1 つにまとめる）
 # 正本は logical-fabrics/skills の .claude/skills/repo-patrol/workflows/。導入先では .github/workflows/ に写す（手で編集しない）
 # 人が次を置くまでは動かない（docs/repo-patrol.md の「Actions で動かす」）:
+#   secrets.ANTHROPIC_API_KEY（Claude Console の組織の API キー。組織のクレジットを使う）か
 #   secrets.CLAUDE_CODE_OAUTH_TOKEN（claude setup-token で作る。持ち主のサブスクの枠を使う）・secrets.SLACK_BOT_TOKEN
 #   vars.REPO_PATROL_MODE: observe（GitHub に書かず、Slack にも投稿しない。報告は job summary）か live
 #   vars.REPO_PATROL_PNPM（任意）: package.json に packageManager がないとき、巡回が使う pnpm の版
@@ -86,7 +87,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # API キーがあればそれだけを渡す（両方あると、どちらで動いたかが分かりにくい）
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.ANTHROPIC_API_KEY == '' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           # Claude GitHub App のトークンではなく、この workflow の permissions に絞ったトークンを使う
           github_token: ${{ github.token }}
           # guard の hook を通らない読み取りのツール（Read・Glob・Grep）は使わせない。/proc などからトークンを読めないように、読むのは guard が見る Bash だけにする
