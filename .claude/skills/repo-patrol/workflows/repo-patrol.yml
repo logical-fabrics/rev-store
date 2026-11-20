@@ -2,7 +2,7 @@
 # 30 日を過ぎたものの close と、公開日で落ちた依存の検査の再実行も、同じ job の step で行う（job ごとに 1 分単位で課金されるため 1 つにまとめる）
 # 正本は logical-fabrics/skills の .claude/skills/repo-patrol/workflows/。導入先では .github/workflows/ に写す（手で編集しない）
 # 人が次を置くまでは動かない（docs/repo-patrol.md の「Actions で動かす」）:
-#   secrets.ANTHROPIC_API_KEY（Claude Console の組織の API キー。組織のクレジットを使う）か
+#   secrets.ANTHROPIC_API_KEY（Claude Console の組織の API キー。組織のクレジットを使い、巡回は Agent SDK で動く）か
 #   secrets.CLAUDE_CODE_OAUTH_TOKEN（claude setup-token で作る。持ち主のサブスクの枠を使う）・secrets.SLACK_BOT_TOKEN
 #   vars.REPO_PATROL_MODE: observe（GitHub に書かず、Slack にも投稿しない。報告は job summary）か live
 #   vars.REPO_PATROL_PNPM（任意）: package.json に packageManager がないとき、巡回が使う pnpm の版
@@ -37,6 +37,7 @@ jobs:
       TZ: Asia/Tokyo
       # 観察モードでは guard が GitHub への書き込みを止める（scheduled task と並行して動かすため）
       REPO_PATROL_OBSERVE: ${{ vars.REPO_PATROL_MODE == 'live' && '0' || '1' }}
+      HAS_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -82,25 +83,51 @@ jobs:
         env:
           PNPM_VERSION: ${{ vars.REPO_PATROL_PNPM }}
 
+      # 2 つの Patrol の step に同じ prompt を渡す
+      - name: Write the prompt
+        id: prompt
+        run: |
+          {
+            echo 'text<<REPO_PATROL_PROMPT_END'
+            cat <<'REPO_PATROL_PROMPT'
+          .claude/skills/repo-patrol/SKILL.md を読んで、そのとおりに巡回する。設定は .claude/repo-patrol.md。ファイルは cat などのシェルのコマンドで読む（Read ツールは使えない）。
+          これは GitHub Actions 上の無人の定期実行。マージ、本番昇格、リポジトリ設定の変更はしない。
+          Slack への投稿はこのあとの step が行うので、手順 6 は `slack-post.sh --check` で確かめるところまでにする。
+          ${{ vars.REPO_PATROL_MODE != 'live' && '観察モード: GitHub には書かない。コメントするはずだった Dependabot の PR は、コメントしたものとして報告する。' || '' }}
+          ${{ steps.close.outcome == 'failure' && 'この job の close の step（Close stale issues and pull requests）が失敗した。手順 4 のとおり要判断にする。' || '' }}
+          ${{ steps.recheck.outcome == 'failure' && 'この job の依存の検査の再実行の step が失敗した。公開から 4 日たっても dependency-check が落ちたままの PR があれば、その理由に添えて要判断にする。' || '' }}
+          REPO_PATROL_PROMPT
+            echo 'REPO_PATROL_PROMPT_END'
+          } >>"$GITHUB_OUTPUT"
+
+      # API キーのときは Agent SDK で動かす（Console のプロモーションクレジットは Claude Code には使えないことがある）。
+      # SDK と依存は agent/package-lock.json の版に固定し、install script は動かさない
+      - name: Install the Agent SDK
+        if: env.HAS_ANTHROPIC_API_KEY == 'true'
+        run: |
+          cp -R .claude/skills/repo-patrol/agent "$RUNNER_TEMP/agent"
+          npm ci --prefix "$RUNNER_TEMP/agent" --ignore-scripts --no-audit --no-fund
+
       - name: Patrol
+        if: env.HAS_ANTHROPIC_API_KEY == 'true'
+        run: node "$RUNNER_TEMP/agent/patrol.mjs"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          PATROL_PROMPT: ${{ steps.prompt.outputs.text }}
+
+      - name: Patrol with the OAuth token
+        if: env.HAS_ANTHROPIC_API_KEY != 'true'
         uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
-          # API キーがあればそれだけを渡す（両方あると、どちらで動いたかが分かりにくい）
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_code_oauth_token: ${{ secrets.ANTHROPIC_API_KEY == '' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Claude GitHub App のトークンではなく、この workflow の permissions に絞ったトークンを使う
           github_token: ${{ github.token }}
           # guard の hook を通らない読み取りのツール（Read・Glob・Grep）は使わせない。/proc などからトークンを読めないように、読むのは guard が見る Bash だけにする
           claude_args: --allowedTools "Bash,Write,Edit" --disallowedTools "Read,Glob,Grep,NotebookEdit,Task,WebFetch,WebSearch"
-          prompt: |
-            .claude/skills/repo-patrol/SKILL.md を読んで、そのとおりに巡回する。設定は .claude/repo-patrol.md。ファイルは cat などのシェルのコマンドで読む（Read ツールは使えない）。
-            これは GitHub Actions 上の無人の定期実行。マージ、本番昇格、リポジトリ設定の変更はしない。
-            Slack への投稿はこのあとの step が行うので、手順 6 は `slack-post.sh --check` で確かめるところまでにする。
-            ${{ vars.REPO_PATROL_MODE != 'live' && '観察モード: GitHub には書かない。コメントするはずだった Dependabot の PR は、コメントしたものとして報告する。' || '' }}
-            ${{ steps.close.outcome == 'failure' && 'この job の close の step（Close stale issues and pull requests）が失敗した。手順 4 のとおり要判断にする。' || '' }}
-            ${{ steps.recheck.outcome == 'failure' && 'この job の依存の検査の再実行の step が失敗した。公開から 4 日たっても dependency-check が落ちたままの PR があれば、その理由に添えて要判断にする。' || '' }}
+          prompt: ${{ steps.prompt.outputs.text }}
 
       # Slack のトークンは、ここにだけ渡す（Claude と、Claude が起動したプロセスには見せない）
       - name: Post the report to Slack
